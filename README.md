@@ -193,7 +193,7 @@ std::string json = mcp.getRelevantToolsAsJson("查询天气");
 统一入口脚本，支持两种测试模式：
 
 ```bash
-bash ./test_all.sh
+bash test_all.sh
 ```
 
 运行后选择模式：
