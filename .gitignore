@@ -1,0 +1,14 @@
+build/
+.codex_upload/
+.vscode/
+.vs/
+
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+
+*.log
