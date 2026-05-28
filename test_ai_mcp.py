@@ -58,35 +58,45 @@ class MCPStdioClient:
     """通过 STDIO 与 MCP Server 通信的简易客户端"""
 
     def __init__(self, server_path, plugins_path, logs_path):
-        self.server_path = server_path
-        self.plugins_path = plugins_path
-        self.logs_path = logs_path
-        self.proc = None
-        self.request_id = 0
+        self.server_path = server_path # mcp服务器可执行文件的路径
+        self.plugins_path = plugins_path # 插件目录路径
+        self.logs_path = logs_path # 日志输出路径
+        self.proc = None # 存储mcp服务器的子进程对象
+        self.request_id = 0 # 请求ID计数器（每次发送jsonrpc请求时递增）
 
+    # 流程：主进程 ←→ stdin/stdout 管道 ←→ MCP 服务器子进程
     def start(self):
         os.makedirs(self.logs_path, exist_ok=True)
         self.proc = subprocess.Popen(
             [self.server_path, "-p", self.plugins_path, "-l", self.logs_path],
-            stdin=subprocess.PIPE,
+            stdin=subprocess.PIPE, # 将子进程的标准输入输出重定向到管道
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,  # 丢弃 stderr，防止管道缓冲区满导致死锁
-            text=True,
+            text=True,                  # 以文本模式读写
             start_new_session=True,     # 新建会话，防止 Ctrl+C 的 SIGINT 杀死服务器
         )
+
+    # 客户端--initialize--> MCP Server，返回: serverInfo (服务器名称、版本、能力等) 
+    def initialize(self):
+        return self.send("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "ai-test-client", "version": "1.0.0"},
+        })
 
     def stop(self):
         if self.proc:
             try:
-                self.proc.stdin.close()
+                self.proc.stdin.close() # 关闭标准输入
             except Exception:
                 pass
             try:
-                self.proc.wait(timeout=5)
+                self.proc.wait(timeout=5) # 等待服务器进程退出
             except Exception:
                 self.proc.kill()
-            self.proc = None
+            self.proc = None # 子进程引用置为null，释放资源
 
+    # 检查子进程是否仍在运行
     def _is_alive(self):
         return self.proc and self.proc.poll() is None
 
@@ -97,6 +107,7 @@ class MCPStdioClient:
                   file=sys.stderr)
             return None
 
+        # 请求报文
         self.request_id += 1
         req_id = str(self.request_id)
         req = {
@@ -105,7 +116,7 @@ class MCPStdioClient:
             "params": params or {},
             "id": req_id,
         }
-        line = json.dumps(req, ensure_ascii=False)
+        line = json.dumps(req, ensure_ascii=False) # 请求报文由字典->字符串
         try:
             self.proc.stdin.write(line + "\n")
             self.proc.stdin.flush()
@@ -113,17 +124,17 @@ class MCPStdioClient:
             print(f"  {YELLOW}[DEBUG] 写入 stdin 失败: {e}{NC}", file=sys.stderr)
             return None
 
-        # 读取响应，跳过服务器推送的 notification 消息
+        # 读取mcp server响应，跳过服务器推送的 notification 消息
         # notification 没有 "id" 字段，而 response 有 "id" 匹配请求
         max_lines = 50  # 防止无限循环
         for i in range(max_lines):
             try:
-                raw_line = self.proc.stdout.readline()  # 不要先 strip
+                raw_line = self.proc.stdout.readline()  # 读取一行原始数据
             except Exception as e:
                 print(f"  {YELLOW}[DEBUG] readline 异常: {e}{NC}", file=sys.stderr)
                 return None
 
-            # readline() 返回 "" 仅在 EOF 时；返回 "\n" 表示空行
+            # readline() 返回 "" 仅在 EOF(进程意外断开) 时；返回 "\n" 表示空行
             if not raw_line:
                 rc = self.proc.poll()
                 print(f"  {YELLOW}[DEBUG] stdout EOF (进程状态={rc}){NC}",
@@ -150,13 +161,6 @@ class MCPStdioClient:
         print(f"  {YELLOW}[DEBUG] 超过 {max_lines} 行未找到匹配响应 "
               f"(req_id={req_id}){NC}", file=sys.stderr)
         return None
-
-    def initialize(self):
-        return self.send("initialize", {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "ai-test-client", "version": "1.0.0"},
-        })
 
     def list_tools(self):
         resp = self.send("tools/list")
