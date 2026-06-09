@@ -25,13 +25,8 @@
 #ifndef MCP_SERVER_PLUGINS_LOADER_H
 #define MCP_SERVER_PLUGINS_LOADER_H
 
-#ifdef _WIN32
-#include <windows.h>
-typedef HMODULE LibraryHandle;
-#else
 #include <dlfcn.h>
-    typedef void* LibraryHandle;
-#endif
+typedef void* LibraryHandle;
 #include <string>
 #include <vector>
 #include <memory>

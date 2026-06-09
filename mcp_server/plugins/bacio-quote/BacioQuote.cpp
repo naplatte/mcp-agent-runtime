@@ -213,11 +213,7 @@ char* HandleRequestImpl(const char* req) {
 
     std::string result = response.dump();
     char* buffer = new char[result.length() + 1];
-#ifdef _WIN32
-    strcpy_s(buffer, result.length() + 1, result.c_str());
-#else
     strcpy(buffer, result.c_str());
-#endif
 
     return buffer;
 }

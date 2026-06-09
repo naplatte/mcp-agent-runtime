@@ -39,18 +39,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
 
 # 平台相关链接
-if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
-else()
-    # POSIX 系统通常不需要额外链接
-endif()
-
 if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    if(WIN32)
-        target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc" "-static-libstdc++" "-static")
-    elseif(UNIX AND NOT APPLE)
-        target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc" "-static-libstdc++")
-    endif()
+    target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc" "-static-libstdc++")
 endif()
 
 # 示例插件

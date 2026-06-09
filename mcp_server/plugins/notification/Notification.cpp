@@ -87,11 +87,7 @@ char* HandleRequestImpl(const char* req) {
 
             std::string errorResult = errorResponse.dump();
             char *errorBuffer = new char[errorResult.length() + 1];
-#ifdef _WIN32
-            strcpy_s(errorBuffer, errorResult.length() + 1, errorResult.c_str());
-#else
             strcpy(errorBuffer, errorResult.c_str());
-#endif
             return errorBuffer;
         }
         std::string progressToken = request["params"]["_meta"]["progressToken"].get<std::string>();
@@ -124,11 +120,7 @@ char* HandleRequestImpl(const char* req) {
 
     std::string result = response.dump();
     char* buffer = new char[result.length() + 1];
-#ifdef _WIN32
-    strcpy_s(buffer, result.length() + 1, result.c_str());
-#else
     strcpy(buffer, result.c_str());
-#endif
 
     return buffer;
 }
