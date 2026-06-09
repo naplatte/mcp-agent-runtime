@@ -11,4 +11,4 @@ find_package(Threads REQUIRED)
 target_link_libraries(sleep PRIVATE Threads::Threads)
 
 target_compile_definitions(sleep PRIVATE SLEEP_EXPORTS)
-target_include_directories(sleep PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src/interface)
+target_include_directories(sleep PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/../third_party)

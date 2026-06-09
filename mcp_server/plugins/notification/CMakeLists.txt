@@ -11,4 +11,4 @@ find_package(Threads REQUIRED)
 target_link_libraries(notification PRIVATE Threads::Threads)
 
 target_compile_definitions(notification PRIVATE NOTIFICATION_EXPORTS)
-target_include_directories(notification PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src/interface)
+target_include_directories(notification PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/../third_party)

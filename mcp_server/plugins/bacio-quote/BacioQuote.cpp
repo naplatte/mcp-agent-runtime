@@ -27,7 +27,7 @@
 #include <random>
 #include "PluginAPI.h"
 #include "json.hpp"
-#include "../../src/utils/MCPBuilder.h"
+#include "MCPBuilder.h"
 
 std::vector<std::string> messages = {
             "Amor che nella mente mi ragiona cominciò egli a dir si dolcemente che la dolcezza ancor dentro mi suona. (Dante)",

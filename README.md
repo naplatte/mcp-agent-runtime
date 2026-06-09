@@ -7,7 +7,7 @@ MCP 协议的完整 C++ 实现，包含 MCP 客户端、MCP 服务器和 RAG-MCP
 ## 项目结构
 
 ```
-mcp_standalone/
+mcp-agent-runtime/
 ├── CMakeLists.txt              # 根构建文件
 ├── README.md
 ├── common/                     # 公共组件（日志）
@@ -31,25 +31,42 @@ mcp_standalone/
 │       ├── mcp_agent_integration.cpp # Agent 集成
 │       └── rag/                     # RAG 实现
 ├── mcp_server/                 # MCP 服务器（独立可执行程序）
-│   ├── src/
+│   ├── include/                # 所有服务器头文件
+│   │   ├── ITransport.h        # 传输层接口
+│   │   ├── PluginAPI.h         # 插件 C ABI 定义
+│   │   ├── Server.h            # 核心 JSON-RPC 服务器
+│   │   ├── StdioTransport.h    # STDIO 传输实现
+│   │   ├── SseTransport.h      # SSE 传输实现
+│   │   ├── PluginsLoader.h     # 动态插件加载器
+│   │   ├── MCPBuilder.h        # JSON-RPC 响应构建器
+│   │   └── SessionBuilder.h    # 会话 ID 生成器
+│   ├── src/                    # 实现文件
 │   │   ├── main.cpp            # 服务器入口
-│   │   ├── server/Server.{h,cpp}    # 核心服务器
-│   │   ├── transport/          # 传输层
-│   │   │   ├── StdioTransport  # 标准 I/O 传输
-│   │   │   └── SseTransport    # SSE 传输
-│   │   ├── interface/          # 接口定义
-│   │   │   ├── ITransport.h    # 传输接口
-│   │   │   └── PluginAPI.h     # 插件 API
-│   │   ├── loader/             # 插件加载器
-│   │   └── utils/              # 工具类
-│   ├── plugins/                # 内置插件
-│   │   ├── calculator/         # 计算器
-│   │   ├── weather/            # 天气查询
-│   │   ├── sleep/              # 延时工具
-│   │   ├── code-review/        # 代码审查
-│   │   ├── notification/       # 通知
-│   │   └── bacio-quote/        # 名言
-│   └── test/                   # 测试脚本
+│   │   ├── Server.cpp          # 核心服务器实现
+│   │   ├── StdioTransport.cpp  # STDIO 传输实现
+│   │   ├── SseTransport.cpp    # SSE 传输实现
+│   │   └── PluginsLoader.cpp   # 插件加载器实现
+│   └── plugins/                # 内置插件
+│       ├── calculator/         # 计算器
+│       ├── weather/            # 天气查询
+│       ├── sleep/              # 延时工具
+│       ├── code-review/        # 代码审查
+│       ├── notification/       # 通知
+│       └── bacio-quote/        # 名言
+├── third_party/                # 第三方库
+│   ├── httplib.h               # cpp-httplib (HTTP 服务器)
+│   ├── json.hpp                # nlohmann/json
+│   ├── popl.hpp                # 命令行参数解析
+│   ├── base64.hpp              # Base64 编解码
+│   └── aixlog.hpp              # 日志库
+├── tests/                      # 测试脚本与配置
+│   ├── test_ai_mcp.py          # AI 集成测试
+│   ├── test_all.sh             # 统一测试入口
+│   ├── test-client-stdio.py    # Python STDIO 测试客户端
+│   ├── test-client-sse.py      # Python SSE 测试客户端
+│   ├── test-client-http.py     # Python HTTP 测试客户端
+│   ├── configuration-*.json    # 测试配置
+│   └── requirements.txt        # Python 依赖
 ├── examples/                   # 示例代码
 │   └── rag_mcp_example.cpp
 └── docs/                       # 文档
@@ -193,7 +210,7 @@ std::string json = mcp.getRelevantToolsAsJson("查询天气");
 统一入口脚本，支持两种测试模式：
 
 ```bash
-bash ./test_all.sh
+bash ./tests/test_all.sh
 ```
 
 运行后选择模式：
@@ -216,14 +233,14 @@ bash ./test_all.sh
 
 ```bash
 # 交互式运行，终端输入 API Key
-bash ./test_all.sh
+bash ./tests/test_all.sh
 # 选择 1
 
 # 或通过环境变量
-DASHSCOPE_API_KEY="sk-xxx" python3 test_ai_mcp.py
+DASHSCOPE_API_KEY="sk-xxx" python3 tests/test_ai_mcp.py
 
 # 指定模型
-DASHSCOPE_API_KEY="sk-xxx" DASHSCOPE_MODEL="qwen-turbo" python3 test_ai_mcp.py
+DASHSCOPE_API_KEY="sk-xxx" DASHSCOPE_MODEL="qwen-turbo" python3 tests/test_ai_mcp.py
 ```
 
 测试覆盖项：
@@ -241,7 +258,7 @@ DASHSCOPE_API_KEY="sk-xxx" DASHSCOPE_MODEL="qwen-turbo" python3 test_ai_mcp.py
 无需 API Key，直接验证 MCP Server 协议正确性：
 
 ```bash
-./test_all.sh
+./tests/test_all.sh
 # 选择 2
 ```
 
@@ -258,7 +275,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-1
 #### Python MCP 客户端测试
 
 ```bash
-cd mcp_server/test
+cd tests
 pip install -r requirements.txt
 python3 test-client-stdio.py configuration-stdio-linux.json
 ```

@@ -20,19 +20,16 @@ find_package(Threads REQUIRED)
 
 set(SOURCES
     src/main.cpp
-    src/server/Server.cpp
-    src/transport/StdioTransport.cpp
-    src/transport/SseTransport.cpp
-    src/loader/PluginsLoader.cpp
+    src/Server.cpp
+    src/StdioTransport.cpp
+    src/SseTransport.cpp
+    src/PluginsLoader.cpp
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 target_include_directories(${PROJECT_NAME} PRIVATE
     include
-    src
-    src/transport
-    src/interface
-    libs_tier_01/aixlog-1.5.0/include
+    ${PROJECT_SOURCE_DIR}/../third_party
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 

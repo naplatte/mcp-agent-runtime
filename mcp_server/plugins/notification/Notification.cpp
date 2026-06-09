@@ -27,7 +27,7 @@
 #include <thread>
 #include "PluginAPI.h"
 #include "json.hpp"
-#include "../../src/utils/MCPBuilder.h"
+#include "MCPBuilder.h"
 
 using json = nlohmann::json;
 

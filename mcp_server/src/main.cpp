@@ -27,11 +27,11 @@
 #include "popl.hpp"
 #include "StdioTransport.h"
 #include "SseTransport.h"
-#include "server/Server.h"
+#include "Server.h"
 #include "aixlog.hpp"
-#include "loader/PluginsLoader.h"
+#include "PluginsLoader.h"
 #include "json.hpp"
-#include "utils/MCPBuilder.h"
+#include "MCPBuilder.h"
 #include <csignal>
 
 using namespace popl;

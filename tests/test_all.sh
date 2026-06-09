@@ -7,6 +7,7 @@
 set -e # 任何命令出错都会停止执行
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "=============================================="
 echo "  MCP 项目测试"
@@ -22,9 +23,9 @@ if [ "$MODE" = "2" ]; then
     # ============================
     # 基础功能测试
     # ============================
-    SERVER="$SCRIPT_DIR/build/mcp_server/mcp_server"
-    PLUGINS="$SCRIPT_DIR/build/mcp_server/plugins"
-    LOGS="$SCRIPT_DIR/build/test_logs"
+    SERVER="$PROJECT_ROOT/build/mcp_server/mcp_server"
+    PLUGINS="$PROJECT_ROOT/build/mcp_server/plugins"
+    LOGS="$PROJECT_ROOT/build/test_logs"
     mkdir -p "$LOGS"
 
     # 检查server二进制文件（依赖文件）是否存在

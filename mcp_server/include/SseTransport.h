@@ -41,8 +41,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <thread>
-#include <httplib.h>
-#include "utils/SessionBuilder.h"
+#include "httplib.h"
+#include "SessionBuilder.h"
 
 namespace vx::transport {
 

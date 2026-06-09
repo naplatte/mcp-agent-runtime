@@ -314,9 +314,10 @@ def mcp_tools_to_openai_format(mcp_tools):
 
 def run_tests(api_key, embedding_key, llm_model):
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    server_path = os.path.join(script_dir, "build", "mcp_server", "mcp_server")
-    plugins_path = os.path.join(script_dir, "build", "mcp_server", "plugins")
-    logs_path = os.path.join(script_dir, "build", "test_logs")
+    project_root = os.path.join(script_dir, "..")
+    server_path = os.path.join(project_root, "build", "mcp_server", "mcp_server")
+    plugins_path = os.path.join(project_root, "build", "mcp_server", "plugins")
+    logs_path = os.path.join(project_root, "build", "test_logs")
 
     if not os.path.isfile(server_path):
         log_fail(f"未找到 mcp_server: {server_path}")

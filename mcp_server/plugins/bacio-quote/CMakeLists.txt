@@ -11,4 +11,4 @@ find_package(Threads REQUIRED)
 target_link_libraries(bacio-quote PRIVATE Threads::Threads)
 
 target_compile_definitions(bacio-quote PRIVATE BACIOQUOTE_EXPORTS)
-target_include_directories(bacio-quote PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src/interface)
+target_include_directories(bacio-quote PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/../third_party)

@@ -13,5 +13,5 @@ target_link_libraries(calculator PRIVATE Threads::Threads)
 target_compile_definitions(calculator PRIVATE CALCULATOR_EXPORTS)
 target_include_directories(calculator PRIVATE 
     ${PROJECT_SOURCE_DIR}/include 
-    ${PROJECT_SOURCE_DIR}/src/interface
+    ${PROJECT_SOURCE_DIR}/../third_party
 )

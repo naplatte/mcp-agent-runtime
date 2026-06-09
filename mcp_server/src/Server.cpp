@@ -27,7 +27,7 @@
 #include "Server.h"
 #include "aixlog.hpp"
 #include "version.h"
-#include "../utils/MCPBuilder.h"
+#include "MCPBuilder.h"
 
 namespace vx::mcp {
 
