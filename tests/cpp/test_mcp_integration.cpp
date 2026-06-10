@@ -19,6 +19,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <chrono>
 #include <cstdlib>
 
 using namespace agent_rpc::mcp;
@@ -161,13 +162,102 @@ static void test_list_resources(MCPClient& client) {
     }
 }
 
+// ========================== 交互模式 ==========================
+
+static void run_interactive(MCPClient& client) {
+    print_header("交互模式");
+
+    auto tools = client.listTools();
+    std::cout << "  可用工具 (" << tools.size() << "):\n";
+    for (size_t i = 0; i < tools.size(); i++) {
+        std::cout << "    \033[0;36m" << (i + 1) << ". " << tools[i].name
+                  << "\033[0m — " << tools[i].description.substr(0, 60) << "\n";
+    }
+
+    std::cout << "\n  命令:\n";
+    std::cout << "    \033[1;33mcall <工具名> <JSON参数>\033[0m  调用工具\n";
+    std::cout << "    \033[1;33mlist\033[0m                    刷新工具列表\n";
+    std::cout << "    \033[1;33mquit\033[0m                    退出\n";
+    std::cout << "\n  示例:\n";
+    std::cout << "    call get_weather {\"city\":\"beijing\",\"latitude\":\"39.9\",\"longitude\":\"116.4\"}\n";
+    std::cout << "    call sleep {\"milliseconds\":500}\n";
+    std::cout << "    call calculator {\"expression\":\"123+456\"}\n";
+
+    std::string line;
+    while (true) {
+        std::cout << "\n\033[1;32mmcp>\033[0m ";
+        std::cout.flush();
+
+        if (!std::getline(std::cin, line)) break;
+        if (line.empty()) continue;
+
+        // quit
+        if (line == "quit" || line == "exit" || line == "q") {
+            break;
+        }
+
+        // list
+        if (line == "list" || line == "ls") {
+            tools = client.listTools();
+            std::cout << "  可用工具 (" << tools.size() << "):\n";
+            for (size_t i = 0; i < tools.size(); i++) {
+                std::cout << "    \033[0;36m" << (i + 1) << ". " << tools[i].name
+                          << "\033[0m — " << tools[i].description.substr(0, 60) << "\n";
+            }
+            continue;
+        }
+
+        // call <tool_name> <json_args>
+        if (line.substr(0, 4) == "call") {
+            // 解析工具名
+            size_t name_start = 5; // skip "call "
+            size_t space_pos = line.find(' ', name_start);
+            std::string tool_name;
+            std::string args = "{}";
+
+            if (space_pos == std::string::npos) {
+                tool_name = line.substr(name_start);
+            } else {
+                tool_name = line.substr(name_start, space_pos - name_start);
+                args = line.substr(space_pos + 1);
+            }
+
+            if (tool_name.empty()) {
+                std::cout << "  \033[0;31m用法: call <工具名> <JSON参数>\033[0m\n";
+                continue;
+            }
+
+            std::cout << "  \033[0;33m调用 " << tool_name << " ...\033[0m\n";
+
+            auto start = std::chrono::steady_clock::now();
+            auto response = client.callTool(tool_name, args);
+            auto end = std::chrono::steady_clock::now();
+            int64_t duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+            if (response.is_error) {
+                std::cout << "  \033[0;31m[ERROR]\033[0m " << response.error << "\n";
+            } else {
+                std::cout << "  \033[0;32m[OK]\033[0m (" << duration_ms << "ms)\n";
+                std::cout << "  " << response.result << "\n";
+            }
+            continue;
+        }
+
+        std::cout << "  未知命令。输入 call/list/quit\n";
+    }
+}
+
 // ========================== 主函数 ==========================
 
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " <server_path> <plugins_path>\n"
+    std::cerr << "Usage: " << prog << " <server_path> <plugins_path> [--interactive]\n"
+              << "\n"
+              << "Options:\n"
+              << "  --interactive, -i    交互模式: 手动输入命令调用工具\n"
               << "\n"
               << "Example:\n"
-              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins\n";
+              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins\n"
+              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins -i\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -178,6 +268,14 @@ int main(int argc, char* argv[]) {
 
     std::string server_path = argv[1];
     std::string plugins_path = argv[2];
+    bool interactive = false;
+
+    for (int i = 3; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--interactive" || arg == "-i") {
+            interactive = true;
+        }
+    }
 
     std::cout << "\033[1;35m";
     std::cout << "╔══════════════════════════════════════════════════════════╗\n";
@@ -203,12 +301,16 @@ int main(int argc, char* argv[]) {
     print_ok("已通过 STDIO 连接到 MCP Server");
 
     // ---------- 运行测试 ----------
-    test_list_tools(client);
-    test_call_weather(client);
-    test_call_sleep(client);
-    test_call_nonexistent(client);
-    test_list_prompts(client);
-    test_list_resources(client);
+    if (interactive) {
+        run_interactive(client);
+    } else {
+        test_list_tools(client);
+        test_call_weather(client);
+        test_call_sleep(client);
+        test_call_nonexistent(client);
+        test_list_prompts(client);
+        test_list_resources(client);
+    }
 
     // ---------- 断开 ----------
     print_header("断开连接");

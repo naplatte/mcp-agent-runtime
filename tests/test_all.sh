@@ -1,9 +1,10 @@
 #!/bin/bash
 # MCP 项目测试入口
-# 支持三种测试模式:
+# 支持四种测试模式:
 #   1. AI 集成测试 (默认)     - 使用阿里百炼 AI 模型测试完整 Agent 链路 (需要 API Key)
 #   2. 基础功能测试            - 无需 API Key，用 bash 直接测 MCP Server 协议
-#   3. C++ 集成测试            - 使用项目自身的 mcp_client 测试 server + plugins
+#   3. C++ 自动化测试          - 使用项目自身的 mcp_client 自动化测试 server + plugins
+#   4. C++ 交互模式            - 手动输入命令调用工具，实时看效果
 
 set -e # 任何命令出错都会停止执行
 
@@ -16,7 +17,8 @@ echo "=============================================="
 echo ""
 echo "  1) AI 集成测试     - 使用百炼 AI 模型 + MCP 工具调用 (需要 API Key)"
 echo "  2) 基础功能测试     - 仅测试 MCP Server 协议和工具 (无需 API Key)"
-echo "  3) C++ 集成测试    - 使用项目自身 mcp_client 测试 server + plugins"
+echo "  3) C++ 自动化测试   - 使用项目自身 mcp_client 自动测试 (无需 API Key)"
+echo "  4) C++ 交互模式    - 手动输入命令调用工具，实时看效果"
 echo ""
 read -rp "选择测试模式 [默认 1]: " MODE
 MODE=${MODE:-1}
@@ -100,6 +102,28 @@ elif [ "$MODE" = "3" ]; then
     fi
 
     exec "$TEST_BIN" "$SERVER" "$PLUGINS"
+
+elif [ "$MODE" = "4" ]; then
+    # ============================
+    # C++ 交互模式
+    # ============================
+    SERVER="$PROJECT_ROOT/build/mcp_server/mcp_server"
+    PLUGINS="$PROJECT_ROOT/build/mcp_server/plugins"
+    TEST_BIN="$PROJECT_ROOT/build/tests/cpp/test_mcp_integration"
+
+    if [ ! -x "$TEST_BIN" ]; then
+        echo "错误: 未找到测试程序: $TEST_BIN"
+        echo "请先构建: mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
+        exit 1
+    fi
+
+    if [ ! -x "$SERVER" ]; then
+        echo "错误: 未找到 mcp_server: $SERVER"
+        echo "请先构建: mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
+        exit 1
+    fi
+
+    exec "$TEST_BIN" "$SERVER" "$PLUGINS" -i
 
 else
     # ============================
