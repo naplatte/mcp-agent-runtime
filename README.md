@@ -4,6 +4,25 @@ MCP 协议的完整 C++ 实现，包含 MCP 客户端、MCP 服务器和 RAG-MCP
 
 从 [agent-communication](../) 项目中独立提取的子项目。
 
+## 使用doxyfile构建：
+```
+doxygen Doxyfile
+cd docs/doxygen_output/html
+python3 -m http.server 8080
+```
+## 项目推送
+```
+# 1. 看看有没有改动
+git status
+
+# 2. 如果有改动，添加并提交
+git add .
+git commit -m "你的提交信息"
+
+# 3. 推送到 GitHub
+git push
+```
+
 ## 项目结构
 
 ```
