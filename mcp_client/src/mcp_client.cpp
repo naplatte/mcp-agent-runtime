@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sstream>
 #include <fstream>
+#include <chrono>
 #include <json/json.h>
 #include <ctime>
 #include <curl/curl.h>
@@ -485,6 +486,8 @@ void MCPClient::processNotificationsStdio() {
                 LOG_ERROR("Error reading from MCP server stdout");
                 break;
             }
+            // 非阻塞管道暂无数据，休眠避免 busy-wait 占满 CPU
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
 }
