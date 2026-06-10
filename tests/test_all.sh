@@ -1,10 +1,11 @@
 #!/bin/bash
 # MCP 项目测试入口
-# 支持四种测试模式:
+# 支持五种测试模式:
 #   1. AI 集成测试 (默认)     - 使用阿里百炼 AI 模型测试完整 Agent 链路 (需要 API Key)
 #   2. 基础功能测试            - 无需 API Key，用 bash 直接测 MCP Server 协议
 #   3. C++ 自动化测试          - 使用项目自身的 mcp_client 自动化测试 server + plugins
 #   4. C++ 交互模式            - 手动输入命令调用工具，实时看效果
+#   5. C++ AI 模式             - 自然语言交互，AI 自动调用 MCP 工具 (需要 API Key)
 
 set -e # 任何命令出错都会停止执行
 
@@ -19,6 +20,7 @@ echo "  1) AI 集成测试     - 使用百炼 AI 模型 + MCP 工具调用 (需�
 echo "  2) 基础功能测试     - 仅测试 MCP Server 协议和工具 (无需 API Key)"
 echo "  3) C++ 自动化测试   - 使用项目自身 mcp_client 自动测试 (无需 API Key)"
 echo "  4) C++ 交互模式    - 手动输入命令调用工具，实时看效果"
+echo "  5) C++ AI 模式     - 自然语言交互，AI 自动调用 MCP 工具 (需要 API Key)"
 echo ""
 read -rp "选择测试模式 [默认 1]: " MODE
 MODE=${MODE:-1}
@@ -124,6 +126,51 @@ elif [ "$MODE" = "4" ]; then
     fi
 
     exec "$TEST_BIN" "$SERVER" "$PLUGINS" -i
+
+elif [ "$MODE" = "5" ]; then
+    # ============================
+    # C++ AI 交互模式
+    # ============================
+    SERVER="$PROJECT_ROOT/build/mcp_server/mcp_server"
+    PLUGINS="$PROJECT_ROOT/build/mcp_server/plugins"
+    TEST_BIN="$PROJECT_ROOT/build/tests/cpp/test_mcp_integration"
+
+    if [ ! -x "$TEST_BIN" ]; then
+        echo "错误: 未找到测试程序: $TEST_BIN"
+        echo "请先构建: mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
+        exit 1
+    fi
+
+    if [ ! -x "$SERVER" ]; then
+        echo "错误: 未找到 mcp_server: $SERVER"
+        echo "请先构建: mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
+        exit 1
+    fi
+
+    # 读取 API Key
+    API_KEY="${DASHSCOPE_API_KEY:-}"
+    if [ -z "$API_KEY" ]; then
+        read -rp "请输入 DashScope API Key: " API_KEY
+    fi
+
+    if [ -z "$API_KEY" ]; then
+        echo "错误: API Key 不能为空"
+        exit 1
+    fi
+
+    # 选择模型
+    echo ""
+    echo "可用模型: 1) qwen-plus  2) qwen-turbo  3) qwen-max"
+    read -rp "选择 LLM 模型 [默认 1]: " MODEL_CHOICE
+    MODEL_CHOICE=${MODEL_CHOICE:-1}
+    case "$MODEL_CHOICE" in
+        1) MODEL="qwen-plus" ;;
+        2) MODEL="qwen-turbo" ;;
+        3) MODEL="qwen-max" ;;
+        *) MODEL="$MODEL_CHOICE" ;;
+    esac
+
+    exec "$TEST_BIN" "$SERVER" "$PLUGINS" --ai "$API_KEY" --model "$MODEL"
 
 else
     # ============================

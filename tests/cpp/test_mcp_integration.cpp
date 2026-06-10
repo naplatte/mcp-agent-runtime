@@ -2,16 +2,20 @@
  * @file test_mcp_integration.cpp
  * @brief C++ 集成测试 — 使用项目自身的 mcp_client 测试 mcp_server + plugins
  *
- * 这条测试链路覆盖的模块:
+ * 测试链路:
  *   mcp_client (MCPClient STDIO) → fork mcp_server → 加载 plugins → 返回结果
  *
- * 编译: cmake --build build --target test_mcp_integration
- * 运行: ./build/tests/cpp/test_mcp_integration <server_path> <plugins_path>
+ * 三种运行模式:
+ *   1. 自动化测试 (默认)         — 自动跑 6 个测试用例
+ *   2. 交互模式 (-i)             — 手动 call/list/quit
+ *   3. AI 模式 (--ai <key>)      — 自然语言交互，LLM 自动调用工具
  *
- * 示例:
- *   ./build/tests/cpp/test_mcp_integration \
- *       ./build/mcp_server/mcp_server \
- *       ./build/mcp_server/plugins
+ * 编译: cmake --build build --target test_mcp_integration
+ * 运行:
+ *   ./build/tests/cpp/test_mcp_integration <server> <plugins>
+ *   ./build/tests/cpp/test_mcp_integration <server> <plugins> -i
+ *   ./build/tests/cpp/test_mcp_integration <server> <plugins> --ai sk-xxx
+ *   ./build/tests/cpp/test_mcp_integration <server> <plugins> --ai sk-xxx --model qwen-max
  */
 
 #include "agent_rpc/mcp/mcp_client.h"
@@ -21,6 +25,11 @@
 #include <vector>
 #include <chrono>
 #include <cstdlib>
+#include <sstream>
+#include <algorithm>
+
+#include <curl/curl.h>
+#include <json/json.h>
 
 using namespace agent_rpc::mcp;
 
@@ -49,6 +58,150 @@ static void print_info(const std::string& msg) {
     std::cout << "  \033[0;33m[INFO]\033[0m " << msg << "\n";
 }
 
+// ========================== CURL 辅助 ==========================
+
+static size_t curlWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    static_cast<std::string*>(userp)->append(
+        static_cast<char*>(contents), size * nmemb);
+    return size * nmemb;
+}
+
+// ========================== DashScope LLM 调用 ==========================
+
+static Json::Value callDashScopeLLM(
+    const std::string& api_key,
+    const std::string& model,
+    const Json::Value& messages,
+    const Json::Value& tools)
+{
+    static const std::string API_URL =
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        Json::Value err;
+        err["error"] = "CURL 初始化失败";
+        return err;
+    }
+
+    // 构建请求体
+    Json::Value body;
+    body["model"] = model;
+    body["messages"] = messages;
+    if (!tools.isNull() && tools.isArray() && tools.size() > 0) {
+        body["tools"] = tools;
+    }
+
+    Json::StreamWriterBuilder wb;
+    wb["indentation"] = "";
+    std::string body_str = Json::writeString(wb, body);
+
+    // 设置 HTTP headers
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    std::string auth = "Authorization: Bearer " + api_key;
+    headers = curl_slist_append(headers, auth.c_str());
+
+    std::string response_data;
+    curl_easy_setopt(curl, CURLOPT_URL, API_URL.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_str.size()));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    Json::Value result;
+    Json::Reader reader;
+
+    if (res != CURLE_OK) {
+        result["error"] = std::string("网络错误: ") + curl_easy_strerror(res);
+        return result;
+    }
+
+    if (!reader.parse(response_data, result)) {
+        result["error"] = "LLM 响应 JSON 解析失败";
+        result["raw"] = response_data.substr(0, 500);
+        return result;
+    }
+
+    if (http_code != 200) {
+        std::string err_msg = result.get("message",
+            "HTTP " + std::to_string(http_code)).asString();
+        Json::Value err;
+        err["error"] = err_msg;
+        err["http_code"] = static_cast<Json::Int64>(http_code);
+        return err;
+    }
+
+    return result;
+}
+
+// ========================== 工具格式转换 ==========================
+
+static Json::Value convertMCPToolsToOpenAIFormat(const std::vector<MCPTool>& tools) {
+    Json::Value openai_tools(Json::arrayValue);
+
+    for (const auto& tool : tools) {
+        Json::Value schema;
+        Json::Reader reader;
+        if (!reader.parse(tool.input_schema, schema)) {
+            schema = Json::Value(Json::objectValue);
+        }
+
+        Json::Value fn;
+        fn["name"] = tool.name;
+        fn["description"] = tool.description;
+        fn["parameters"] = schema;
+
+        Json::Value entry;
+        entry["type"] = "function";
+        entry["function"] = fn;
+
+        openai_tools.append(entry);
+    }
+
+    return openai_tools;
+}
+
+// ========================== 工具结果提取 ==========================
+
+static std::string extractToolResultText(const MCPResponse& response) {
+    if (response.is_error) {
+        return "Error: " + response.error;
+    }
+
+    Json::Value root;
+    Json::Reader reader;
+    if (!reader.parse(response.result, root)) {
+        return response.result;
+    }
+
+    std::string text;
+    const Json::Value& content = root["content"];
+    if (content.isArray()) {
+        for (const auto& item : content) {
+            if (item.get("type", "") == "text") {
+                text += item.get("text", "").asString();
+            }
+        }
+    }
+
+    if (text.empty()) {
+        text = response.result;
+    }
+
+    return text;
+}
+
 // ========================== 测试用例 ==========================
 
 static void test_list_tools(MCPClient& client) {
@@ -67,7 +220,6 @@ static void test_list_tools(MCPClient& client) {
         print_info("  - " + tool.name + ": " + tool.description.substr(0, 60) + "...");
     }
 
-    // 检查是否包含预期的工具
     bool has_weather = false, has_sleep = false;
     for (const auto& tool : tools) {
         if (tool.name == "get_weather") has_weather = true;
@@ -93,7 +245,6 @@ static void test_call_weather(MCPClient& client) {
     }
 
     print_ok("get_weather 调用成功");
-    // 截取前 200 字符展示
     std::string preview = response.result.substr(0, std::min(response.result.size(), size_t(200)));
     print_info("结果预览: " + preview + (response.result.size() > 200 ? "..." : ""));
 }
@@ -121,7 +272,6 @@ static void test_call_nonexistent(MCPClient& client) {
     if (response.is_error) {
         print_ok("正确返回了错误: " + response.error);
     } else {
-        // 有些实现可能在 result 里标记 isError
         if (response.result.find("isError") != std::string::npos &&
             response.result.find("true") != std::string::npos) {
             print_ok("result 中标记了 isError=true");
@@ -136,7 +286,6 @@ static void test_list_prompts(MCPClient& client) {
 
     auto prompts = client.listPrompts();
 
-    // prompts 可能为空（取决于插件），不一定是失败
     print_info("获取到 " + std::to_string(prompts.size()) + " 个 prompt");
     for (const auto& prompt : prompts) {
         print_info("  - " + prompt.name + ": " + prompt.description);
@@ -162,7 +311,7 @@ static void test_list_resources(MCPClient& client) {
     }
 }
 
-// ========================== 交互模式 ==========================
+// ========================== 交互模式 (手动) ==========================
 
 static void run_interactive(MCPClient& client) {
     print_header("交互模式");
@@ -191,12 +340,10 @@ static void run_interactive(MCPClient& client) {
         if (!std::getline(std::cin, line)) break;
         if (line.empty()) continue;
 
-        // quit
         if (line == "quit" || line == "exit" || line == "q") {
             break;
         }
 
-        // list
         if (line == "list" || line == "ls") {
             tools = client.listTools();
             std::cout << "  可用工具 (" << tools.size() << "):\n";
@@ -207,10 +354,8 @@ static void run_interactive(MCPClient& client) {
             continue;
         }
 
-        // call <tool_name> <json_args>
         if (line.substr(0, 4) == "call") {
-            // 解析工具名
-            size_t name_start = 5; // skip "call "
+            size_t name_start = 5;
             size_t space_pos = line.find(' ', name_start);
             std::string tool_name;
             std::string args = "{}";
@@ -247,17 +392,159 @@ static void run_interactive(MCPClient& client) {
     }
 }
 
+// ========================== AI 交互模式 ==========================
+
+static void run_ai_interactive(
+    MCPClient& client,
+    const std::string& api_key,
+    const std::string& model)
+{
+    print_header("AI 交互模式 (Natural Language + MCP)");
+
+    // 获取工具并转换格式
+    auto tools = client.listTools();
+    if (tools.empty()) {
+        print_fail("没有可用的 MCP 工具");
+        return;
+    }
+
+    Json::Value openai_tools = convertMCPToolsToOpenAIFormat(tools);
+
+    std::cout << "  可用工具 (" << tools.size() << "):\n";
+    for (size_t i = 0; i < tools.size(); i++) {
+        std::cout << "    \033[0;36m" << (i + 1) << ". " << tools[i].name
+                  << "\033[0m — " << tools[i].description.substr(0, 80) << "\n";
+    }
+    std::cout << "\n  \033[1;33m模型: " << model << "\033[0m\n";
+    std::cout << "  输入自然语言问题，AI 会自动选择并调用工具。\n";
+    std::cout << "  输入 \033[1;33mquit\033[0m 退出。\n";
+
+    static const int MAX_AGENT_ROUNDS = 10;
+
+    std::string line;
+    while (true) {
+        std::cout << "\n\033[1;32m你\033[0m: ";
+        std::cout.flush();
+
+        if (!std::getline(std::cin, line)) break;
+        if (line.empty()) continue;
+        if (line == "quit" || line == "exit" || line == "q") break;
+
+        // 初始化消息历史
+        Json::Value messages(Json::arrayValue);
+
+        Json::Value sys_msg;
+        sys_msg["role"] = "system";
+        sys_msg["content"] = "你是一个智能助手，可以使用提供的工具来回答用户问题。"
+                             "当需要使用工具时，请调用对应的工具。"
+                             "请用用户的语言（中文或英文）回答。";
+        messages.append(sys_msg);
+
+        Json::Value user_msg;
+        user_msg["role"] = "user";
+        user_msg["content"] = line;
+        messages.append(user_msg);
+
+        bool answered = false;
+
+        for (int round = 0; round < MAX_AGENT_ROUNDS; ++round) {
+            std::cout << "  \033[0;33m[AI 思考中...]\033[0m\n";
+
+            Json::Value llm_resp = callDashScopeLLM(
+                api_key, model, messages, openai_tools);
+
+            // 检查错误
+            if (llm_resp.isMember("error")) {
+                std::cout << "  \033[0;31m[LLM 错误]\033[0m "
+                          << llm_resp["error"].asString() << "\n";
+                break;
+            }
+
+            // 提取 assistant 消息
+            const Json::Value& choices = llm_resp["choices"];
+            if (!choices.isArray() || choices.empty()) {
+                std::cout << "  \033[0;31m[错误]\033[0m LLM 返回无 choices\n";
+                break;
+            }
+
+            const Json::Value& assistant_msg = choices[0]["message"];
+            std::string content = assistant_msg.get("content", "").asString();
+            const Json::Value& tool_calls = assistant_msg["tool_calls"];
+
+            // 没有 tool_calls → 最终回答
+            if (tool_calls.isNull() || !tool_calls.isArray() || tool_calls.empty()) {
+                std::cout << "  \033[0;36m[AI]\033[0m " << content << "\n";
+                answered = true;
+                break;
+            }
+
+            // 有 tool_calls → 追加 assistant 消息到历史
+            messages.append(assistant_msg);
+
+            std::cout << "  \033[0;33m[AI 调用工具] ("
+                      << tool_calls.size() << " 个)\033[0m\n";
+
+            // 执行每个工具调用
+            for (const auto& tc : tool_calls) {
+                const Json::Value& fn = tc["function"];
+                std::string tool_name = fn.get("name", "").asString();
+                std::string args_str = fn.get("arguments", "{}").asString();
+                std::string tc_id = tc.get("id", "").asString();
+
+                std::cout << "    → " << tool_name << "("
+                          << args_str.substr(0, 120) << ")\n";
+
+                auto start = std::chrono::steady_clock::now();
+                MCPResponse mcp_resp = client.callTool(tool_name, args_str);
+                auto end = std::chrono::steady_clock::now();
+                int64_t ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(end - start).count();
+
+                std::string result_text = extractToolResultText(mcp_resp);
+
+                if (mcp_resp.is_error) {
+                    std::cout << "    \033[0;31m[工具错误]\033[0m "
+                              << result_text.substr(0, 200) << "\n";
+                } else {
+                    std::cout << "    \033[0;32m[工具结果]\033[0m ("
+                              << ms << "ms) "
+                              << result_text.substr(0, 200)
+                              << (result_text.size() > 200 ? "..." : "")
+                              << "\n";
+                }
+
+                // 追加工具结果消息
+                Json::Value tool_msg;
+                tool_msg["role"] = "tool";
+                tool_msg["tool_call_id"] = tc_id;
+                tool_msg["content"] = result_text;
+                messages.append(tool_msg);
+            }
+
+            // 继续 agent loop
+        }
+
+        if (!answered) {
+            std::cout << "  \033[0;31m[超出最大轮次或出错]\033[0m\n";
+        }
+    }
+}
+
 // ========================== 主函数 ==========================
 
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " <server_path> <plugins_path> [--interactive]\n"
+    std::cerr << "Usage: " << prog << " <server_path> <plugins_path> [options]\n"
               << "\n"
               << "Options:\n"
-              << "  --interactive, -i    交互模式: 手动输入命令调用工具\n"
+              << "  --interactive, -i         交互模式: 手动输入命令调用工具\n"
+              << "  --ai <api_key>            AI 模式: 自然语言交互, AI 自动调用工具\n"
+              << "  --model <model>           指定 LLM 模型 (默认: qwen-plus)\n"
               << "\n"
-              << "Example:\n"
+              << "Examples:\n"
               << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins\n"
-              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins -i\n";
+              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins -i\n"
+              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins --ai sk-xxx\n"
+              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins --ai sk-xxx --model qwen-max\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -269,11 +556,17 @@ int main(int argc, char* argv[]) {
     std::string server_path = argv[1];
     std::string plugins_path = argv[2];
     bool interactive = false;
+    std::string ai_api_key;
+    std::string ai_model = "qwen-plus";
 
     for (int i = 3; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--interactive" || arg == "-i") {
             interactive = true;
+        } else if (arg == "--ai" && i + 1 < argc) {
+            ai_api_key = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            ai_model = argv[++i];
         }
     }
 
@@ -301,9 +594,14 @@ int main(int argc, char* argv[]) {
     print_ok("已通过 STDIO 连接到 MCP Server");
 
     // ---------- 运行测试 ----------
-    if (interactive) {
+    if (!ai_api_key.empty()) {
+        // AI 自然语言模式
+        run_ai_interactive(client, ai_api_key, ai_model);
+    } else if (interactive) {
+        // 手动交互模式
         run_interactive(client);
     } else {
+        // 自动化测试
         test_list_tools(client);
         test_call_weather(client);
         test_call_sleep(client);
