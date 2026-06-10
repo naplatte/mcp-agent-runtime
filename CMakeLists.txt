@@ -24,3 +24,9 @@ option(BUILD_MCP_EXAMPLES "Build MCP examples" ON)
 if(BUILD_MCP_EXAMPLES)
     add_subdirectory(examples)
 endif()
+
+# 测试程序
+option(BUILD_TESTS "Build C++ test programs" ON)
+if(BUILD_TESTS)
+    add_subdirectory(tests/cpp)
+endif()

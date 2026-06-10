@@ -79,13 +79,17 @@ mcp-agent-runtime/
 │   ├── base64.hpp              # Base64 编解码
 │   └── aixlog.hpp              # 日志库
 ├── tests/                      # 测试脚本与配置
-│   ├── test_ai_mcp.py          # AI 集成测试
 │   ├── test_all.sh             # 统一测试入口
-│   ├── test-client-stdio.py    # Python STDIO 测试客户端
-│   ├── test-client-sse.py      # Python SSE 测试客户端
-│   ├── test-client-http.py     # Python HTTP 测试客户端
-│   ├── configuration-*.json    # 测试配置
-│   └── requirements.txt        # Python 依赖
+│   ├── cpp/                    # C++ 集成测试 (使用项目自身 mcp_client)
+│   │   └── test_mcp_integration.cpp
+│   ├── python/                 # Python 测试客户端
+│   │   ├── test_ai_mcp.py      # AI 集成测试
+│   │   ├── test-client-stdio.py
+│   │   ├── test-client-sse.py
+│   │   └── test-client-http.py
+│   └── config/                 # 测试配置
+│       ├── configuration-*.json
+│       └── requirements.txt
 ├── examples/                   # 示例代码
 │   └── rag_mcp_example.cpp
 └── docs/                       # 文档
@@ -226,7 +230,7 @@ std::string json = mcp.getRelevantToolsAsJson("查询天气");
 
 ### 测试 MCP 服务器
 
-统一入口脚本，支持两种测试模式：
+统一入口脚本，支持三种测试模式：
 
 ```bash
 bash ./tests/test_all.sh
@@ -235,7 +239,8 @@ bash ./tests/test_all.sh
 运行后选择模式：
 
 - **模式 1 — AI 集成测试（推荐）**：使用阿里百炼 AI 模型，测试完整 Agent 工具调用链路
-- **模式 2 — 基础功能测试**：无需 API Key，仅验证 MCP Server 协议和插件
+- **模式 2 — 基础功能测试**：无需 API Key，用 bash 验证 MCP Server 协议和插件
+- **模式 3 — C++ 集成测试**：使用项目自身的 mcp_client 测试 server + plugins（全链路 C++）
 
 #### AI 集成测试
 
@@ -256,10 +261,10 @@ bash ./tests/test_all.sh
 # 选择 1
 
 # 或通过环境变量
-DASHSCOPE_API_KEY="sk-xxx" python3 tests/test_ai_mcp.py
+DASHSCOPE_API_KEY="sk-xxx" python3 tests/python/test_ai_mcp.py
 
 # 指定模型
-DASHSCOPE_API_KEY="sk-xxx" DASHSCOPE_MODEL="qwen-turbo" python3 tests/test_ai_mcp.py
+DASHSCOPE_API_KEY="sk-xxx" DASHSCOPE_MODEL="qwen-turbo" python3 tests/python/test_ai_mcp.py
 ```
 
 测试覆盖项：
@@ -291,12 +296,26 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-1
   | ./build/mcp_server/mcp_server -p ./build/mcp_server/plugins -l ./build/test_logs
 ```
 
+#### C++ 集成测试
+
+使用项目自身的 C++ `mcp_client` 模块连接 `mcp_server`，测试完整的 C++ 链路：
+
+```bash
+./tests/test_all.sh
+# 选择 3
+
+# 或直接运行
+./build/tests/cpp/test_mcp_integration ./build/mcp_server/mcp_server ./build/mcp_server/plugins
+```
+
+覆盖：连接 (STDIO)、list_tools、call_tool (weather/sleep)、错误处理、list_prompts、list_resources。
+
 #### Python MCP 客户端测试
 
 ```bash
 cd tests
-pip install -r requirements.txt
-python3 test-client-stdio.py configuration-stdio-linux.json
+pip install -r config/requirements.txt
+python3 python/test-client-stdio.py config/configuration-stdio-linux.json
 ```
 
 ## 开发自定义插件

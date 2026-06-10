@@ -2,6 +2,7 @@ build/
 .codex_upload/
 .vscode/
 .vs/
+.cache/
 docs/doxygen_output/
 
 *.o

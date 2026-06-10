@@ -1,8 +1,9 @@
 #!/bin/bash
 # MCP 项目测试入口
-# 支持两种测试模式:
-#   1. AI 集成测试 (默认) - 使用阿里百炼 AI 模型测试完整 Agent 链路
-#   2. 基础功能测试        - 无需 API Key，仅测试 MCP Server 基础功能
+# 支持三种测试模式:
+#   1. AI 集成测试 (默认)     - 使用阿里百炼 AI 模型测试完整 Agent 链路 (需要 API Key)
+#   2. 基础功能测试            - 无需 API Key，用 bash 直接测 MCP Server 协议
+#   3. C++ 集成测试            - 使用项目自身的 mcp_client 测试 server + plugins
 
 set -e # 任何命令出错都会停止执行
 
@@ -13,29 +14,28 @@ echo "=============================================="
 echo "  MCP 项目测试"
 echo "=============================================="
 echo ""
-echo "  1) AI 集成测试 - 使用百炼 AI 模型 + MCP 工具调用 (需要 API Key)"
-echo "  2) 基础功能测试 - 仅测试 MCP Server 协议和工具 (无需 API Key)"
+echo "  1) AI 集成测试     - 使用百炼 AI 模型 + MCP 工具调用 (需要 API Key)"
+echo "  2) 基础功能测试     - 仅测试 MCP Server 协议和工具 (无需 API Key)"
+echo "  3) C++ 集成测试    - 使用项目自身 mcp_client 测试 server + plugins"
 echo ""
 read -rp "选择测试模式 [默认 1]: " MODE
 MODE=${MODE:-1}
 
 if [ "$MODE" = "2" ]; then
     # ============================
-    # 基础功能测试
+    # 基础功能测试 (bash)
     # ============================
     SERVER="$PROJECT_ROOT/build/mcp_server/mcp_server"
     PLUGINS="$PROJECT_ROOT/build/mcp_server/plugins"
     LOGS="$PROJECT_ROOT/build/test_logs"
     mkdir -p "$LOGS"
 
-    # 检查server二进制文件（依赖文件）是否存在
     if [ ! -x "$SERVER" ]; then
         echo "错误: 未找到 mcp_server: $SERVER"
         echo "请先构建: mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
         exit 1
     fi
 
-    # 定义初始化消息（initialize请求，用来初始化服务器连接）
     INIT='{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":"init"}'
 
     run() { echo -e "${INIT}\n$1" | timeout 15 "$SERVER" -p "$PLUGINS" -l "$LOGS" 2>/dev/null || true; }
@@ -79,10 +79,31 @@ if [ "$MODE" = "2" ]; then
     [ "$FAIL" -eq 0 ] && echo -e "\033[0;32m所有测试通过!\033[0m" || echo -e "\033[0;31m有 $FAIL 个测试失败\033[0m"
     exit "$FAIL"
 
+elif [ "$MODE" = "3" ]; then
+    # ============================
+    # C++ 集成测试
+    # ============================
+    SERVER="$PROJECT_ROOT/build/mcp_server/mcp_server"
+    PLUGINS="$PROJECT_ROOT/build/mcp_server/plugins"
+    TEST_BIN="$PROJECT_ROOT/build/tests/cpp/test_mcp_integration"
+
+    if [ ! -x "$TEST_BIN" ]; then
+        echo "错误: 未找到测试程序: $TEST_BIN"
+        echo "请先构建: mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
+        exit 1
+    fi
+
+    if [ ! -x "$SERVER" ]; then
+        echo "错误: 未找到 mcp_server: $SERVER"
+        echo "请先构建: mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
+        exit 1
+    fi
+
+    exec "$TEST_BIN" "$SERVER" "$PLUGINS"
 
 else
     # ============================
     # AI 集成测试
     # ============================
-    exec python3 "$SCRIPT_DIR/test_ai_mcp.py"
+    exec python3 "$SCRIPT_DIR/python/test_ai_mcp.py"
 fi
