@@ -21,6 +21,10 @@ git commit -m "你的提交信息"
 
 # 3. 推送到 GitHub
 git push
+
+pull异常：
+sudo chown -R admin:admin ~/mcp-agent-runtime/.git
+git pull
 ```
 
 ## 项目结构

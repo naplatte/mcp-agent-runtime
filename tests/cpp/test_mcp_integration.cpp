@@ -419,12 +419,12 @@ static void run_ai_interactive(
     std::cout << "  输入自然语言问题，AI 会自动选择并调用工具。\n";
     std::cout << "  输入 \033[1;33mquit\033[0m 退出。\n";
 
-    static const int MAX_AGENT_ROUNDS = 10;
+    static const int MAX_AGENT_ROUNDS = 10; // 最多循环10轮，最后断开mcp连接
 
-    std::string line;
+    std::string line; // 你输入的问题
     while (true) {
-        std::cout << "\n\033[1;32m你\033[0m: ";
-        std::cout.flush();
+        std::cout << "\n\033[1;32m你\033[0m: "; // `\n`（换行）+ `\033[1;32m`（加粗绿色）+ `你`（文本）+ `\033[0m`（重置样式）
+        std::cout.flush(); // 手动刷新输出缓冲区，强制立即将 std::cout 中缓存的内容写到终端
 
         if (!std::getline(std::cin, line)) break;
         if (line.empty()) continue;
@@ -433,11 +433,11 @@ static void run_ai_interactive(
         // 初始化消息历史
         Json::Value messages(Json::arrayValue);
 
-        Json::Value sys_msg;
+        Json::Value sys_msg; // 提示词
         sys_msg["role"] = "system";
         sys_msg["content"] = "你是一个智能助手，可以使用提供的工具来回答用户问题。"
                              "当需要使用工具时，请调用对应的工具。"
-                             "请用用户的语言（中文或英文）回答。";
+                             "请用用户的语言回答。";
         messages.append(sys_msg);
 
         Json::Value user_msg;
@@ -533,7 +533,7 @@ static void run_ai_interactive(
 // ========================== 主函数 ==========================
 
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " <server_path> <plugins_path> [options]\n"
+    std::cerr << "Usage: " << prog << " <server_path> <plugins_path> [options]\n"   // std::cerr:标准错误输出，写入内容立即刷新(不经缓冲)
               << "\n"
               << "Options:\n"
               << "  --interactive, -i         交互模式: 手动输入命令调用工具\n"
@@ -583,7 +583,7 @@ int main(int argc, char* argv[]) {
     // ---------- 连接 ----------
     print_header("连接 MCP Server");
 
-    MCPClient client;
+    MCPClient client; // 客户端对象
     std::vector<std::string> server_args = {"-p", plugins_path};
 
     if (!client.connect(server_path, server_args)) {

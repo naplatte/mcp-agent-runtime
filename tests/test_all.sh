@@ -170,7 +170,7 @@ elif [ "$MODE" = "5" ]; then
         *) MODEL="$MODEL_CHOICE" ;;
     esac
 
-    exec "$TEST_BIN" "$SERVER" "$PLUGINS" --ai "$API_KEY" --model "$MODEL"
+    exec "$TEST_BIN" "$SERVER" "$PLUGINS" --ai "$API_KEY" --model "$MODEL" # 用当前进程直接运行 $TEST_BIN 这个程序，并把后面所有变量当作参数传给它
 
 else
     # ============================
