@@ -13,6 +13,7 @@ set(MCP_CLIENT_SOURCES
     src/rag/tool_validator.cpp
 )
 
+# 将上述cpp文件编译为静态库
 add_library(mcp_client STATIC ${MCP_CLIENT_SOURCES})
 
 # 设置包含目录
@@ -20,11 +21,11 @@ target_include_directories(mcp_client PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# 查找 jsoncpp
+# 查找 jsoncpp 依赖
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(JSONCPP REQUIRED jsoncpp)
 
-# 链接依赖库
+# 链接依赖库(common库和第三方库)
 target_link_libraries(mcp_client PUBLIC
     mcp_common
 )
@@ -35,12 +36,13 @@ target_link_libraries(mcp_client PRIVATE
     CURL::libcurl
 )
 
+# 设置 jsoncpp 头文件路径
 target_include_directories(mcp_client PRIVATE ${JSONCPP_INCLUDE_DIRS})
 
 # C++20 标准
 target_compile_features(mcp_client PRIVATE cxx_std_20)
 
-# 编译选项
+# 编译选项 - 根据 Debug / 非 Debug 模式设置不同编译参数
 if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(mcp_client PRIVATE -Wall -Wextra -Wpedantic)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -50,7 +52,7 @@ if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     endif()
 endif()
 
-# 安装规则
+# 设置库文件和头文件的安装规则
 install(TARGETS mcp_client
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(MCP_Standalone VERSION 1.0.0 LANGUAGES CXX)
+project(MCP_Standalone VERSION 1.0.0 LANGUAGES CXX) # 模块名：MCP_Standalone
 
 set(CMAKE_CXX_STANDARD 20) # C++20
 set(CMAKE_CXX_STANDARD_REQUIRED ON) # 必须使用C++20,若编译器不支持 不会自动降版本

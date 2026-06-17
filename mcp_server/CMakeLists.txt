@@ -4,7 +4,7 @@ project(mcp_server)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# 设置版本号
+# 设置版本号0.7.0
 set(PROJECT_VERSION_MAJOR 0)
 set(PROJECT_VERSION_MINOR 7)
 set(PROJECT_VERSION_PATCH 0)
@@ -16,8 +16,10 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/version.h"
 )
 
+# 查找线程库
 find_package(Threads REQUIRED)
 
+# 源文件
 set(SOURCES
     src/main.cpp
     src/Server.cpp
@@ -26,6 +28,7 @@ set(SOURCES
     src/PluginsLoader.cpp
 )
 
+# 生成一个可执行文件（和client不同，client最终是编译出了一个静态库）
 add_executable(${PROJECT_NAME} ${SOURCES})
 target_include_directories(${PROJECT_NAME} PRIVATE
     include
@@ -33,6 +36,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# mcp_server链接线程库
 target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
 
 # 平台相关链接
@@ -40,7 +44,7 @@ if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_link_options(${PROJECT_NAME} PRIVATE "-static-libgcc" "-static-libstdc++")
 endif()
 
-# 示例插件
+# 编译多个示例插件
 add_subdirectory(plugins/weather)
 add_subdirectory(plugins/sleep)
 add_subdirectory(plugins/code-review)

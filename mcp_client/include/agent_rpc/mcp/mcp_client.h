@@ -21,21 +21,21 @@ enum class MCPTransportType {
     SSE         // Server-Sent Events（HTTP 远程）
 };
 
-// MCP工具定义
+// MCP工具数据结构定义
 struct MCPTool {
     std::string name;
     std::string description;
-    std::string input_schema;  // JSON schema
+    std::string input_schema;  // JSON schema 输入模式
 };
 
-// MCP提示定义
+// MCP提示数据结构定义
 struct MCPPrompt {
     std::string name;
     std::string description;
-    std::string arguments;  // JSON arguments
+    std::string arguemnts;  // JSON arguments
 };
 
-// MCP资源定义
+// MCP资源数据结构定义
 struct MCPResource {
     std::string name;
     std::string description;
@@ -43,7 +43,7 @@ struct MCPResource {
     std::string mime_type;
 };
 
-// MCP请求/响应
+// MCP请求/响应 - client 内部封装 JSON-RPC 请求和响应
 struct MCPRequest {
     std::string method;
     std::string params;
@@ -73,7 +73,7 @@ struct MCPConnectionConfig {
     bool verify_ssl = true;                     // 是否验证 SSL 证书
 };
 
-// MCP客户端接口
+// MCP客户端抽象接口 - IMCPClient 定义了 MCP Client 对外应具备的完整能力
 class IMCPClient {
 public:
     virtual ~IMCPClient() = default;
@@ -101,7 +101,8 @@ public:
     virtual void setNotificationCallback(std::function<void(const std::string&, const std::string&)> callback) = 0;
 };
 
-// MCP客户端实现（支持 STDIO 和 SSE 两种传输方式）
+// MCP客户端实现（支持 STDIO 和 SSE 两种传输方式） 真正负责与server通信的类
+// 它实现了IMCPClient，public 部分基本就是刚才接口里的能力
 class MCPClient : public IMCPClient {
 public:
     MCPClient();
@@ -184,6 +185,10 @@ private:
 };
 
 // MCP工具管理器
+// 管理工具列表、缓存工具信息、判断工具是否存在、执行工具调用
+// 比 MCPClient 高一层
+// MCPClient 负责“通信”,MCPToolManager 负责“工具管理”
+
 class MCPToolManager {
 public:
     MCPToolManager(std::shared_ptr<IMCPClient> mcp_client);
@@ -221,6 +226,8 @@ private:
 };
 
 // MCP服务集成器
+// 更高一层的简单集成器
+
 class MCPServiceIntegrator {
 public:
     MCPServiceIntegrator();
@@ -255,3 +262,17 @@ private:
 } // namespace agent_rpc
 
 
+// MCPServiceIntegrator
+//         │
+//         ├── MCPClient
+//         │       │
+//         │       ├── STDIO
+//         │       └── SSE
+//         │
+//         └── MCPToolManager
+//                 │
+//                 ▼
+//              IMCPClient
+//                 │
+//                 ▼
+//              MCPClient
