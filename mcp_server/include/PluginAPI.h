@@ -28,6 +28,7 @@
 #define PLUGIN_API __attribute__((visibility("default")))
 
 #ifdef __cplusplus
+// 使用 C 语言的符号命名规则
 extern "C" {
 #endif
 
@@ -78,7 +79,7 @@ typedef struct {
     NotificationSystem* notifications;
 } PluginAPI;
 
-PLUGIN_API PluginAPI* CreatePlugin();
+PLUGIN_API PluginAPI* CreatePlugin(); // 返回一个api实例
 PLUGIN_API void DestroyPlugin(PluginAPI*);
 
 #ifdef __cplusplus

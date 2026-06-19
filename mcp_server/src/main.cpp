@@ -36,7 +36,7 @@
 
 using namespace popl;
 
-std::shared_ptr<vx::mcp::Server> server;
+std::shared_ptr<vx::mcp::Server> server; // server实例
 
 struct NotificationState {
     std::mutex serverNotificationMutex;
@@ -68,6 +68,7 @@ int main(int argc, char **argv) {
     std::string logs_directory;
     bool verbose;
 
+    // 三大核心
     std::shared_ptr<vx::ITransport> transport;
     auto loader = std::make_shared<vx::mcp::PluginsLoader>();
     server = std::make_shared<vx::mcp::Server>();
@@ -78,7 +79,8 @@ int main(int argc, char **argv) {
     signal(SIGINT, stop_handler);
 
     //============================================================================================
-    // setup command line options
+    // 解析启动参数
+    // 比如以stdio模式启动服务器，命令行为：./build/mcp_server/mcp_server -p ./build/mcp_server/plugins
     //============================================================================================
     OptionParser op("Allowed options");
     auto help_option = op.add<Switch>("", "help", "produce help message");
@@ -110,7 +112,7 @@ int main(int argc, char **argv) {
     }
 
     //============================================================================================
-    // setup transport
+    // 选择传输方式
     //============================================================================================
     if (use_sse_server->is_set()) {
         transport = std::make_shared<vx::transport::SSE>();
@@ -146,14 +148,14 @@ int main(int argc, char **argv) {
     LOG(INFO) << "Press Ctrl+C to exit." << std::endl;
 
     //============================================================================================
-    // load all plugins from the plugins directory
+    // 加载插件
     //============================================================================================
     if (loader->LoadPlugins(plugins_directory)) {
         LOG(INFO) << "Successfully loaded plugins" << std::endl;
     }
 
     //============================================================================================
-    // enable notification system
+    // 给插件注入通知回调
     //============================================================================================
     for (auto& plugin : loader->GetPlugins()) {
         plugin.instance->notifications = new NotificationSystem();
