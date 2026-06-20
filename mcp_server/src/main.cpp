@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
     }
 
     //============================================================================================
-    // setup logger
+    // 初始化日志
     //============================================================================================
     // Get the current time as ISO 8601 string
     auto now = std::chrono::system_clock::now();
@@ -167,6 +167,10 @@ int main(int argc, char **argv) {
     //============================================================================================
     server->Name(name);
     server->VerboseLevel(verbose ? 1 : 0);
+
+    // 这里是调用了这个函数，第二个参数是个lambda表达式
+    // 意思是：把 tools/list 这个 method 对应的处理逻辑，替换成这里传进去的 lambda 函数。
+    // server.cpp中实现的Overridecallback，实际上是定义了一个框架,在main.cpp中才真正为这个框架里面去装东西
     server->OverrideCallback("tools/list", [&loader](const json& request) {
         nlohmann::ordered_json response = MCPBuilder::Response(request);
         response["result"]["tools"] = json::array();
@@ -186,27 +190,35 @@ int main(int argc, char **argv) {
 
         return response;
     });
+
     server->OverrideCallback("tools/call", [&loader](const json& request) {
+        // 构建基础响应（填充 id / jsonrpc 等字段）
         nlohmann::ordered_json response = MCPBuilder::Response(request);
 
+        // 插件返回的原始字符串指针，由插件内部 malloc/new[] 分配
         char* res_ptr = nullptr;
 
+        // 遍历所有已加载的插件，查找匹配的工具
         for (const auto& plugin : loader->GetPlugins()) {
             if (plugin.instance->GetType() == PLUGIN_TYPE_TOOLS) {
                 for (int i = 0; i < plugin.instance->GetToolCount(); i++) {
                     auto pluginTool = plugin.instance->GetTool(i);
+                    // 按工具名匹配请求中指定的工具
                     if (pluginTool->name == request["params"]["name"]) {
+                        // 将请求序列化后交给插件处理
                         res_ptr = plugin.instance->HandleRequest(request.dump().c_str());
                         if (res_ptr) {
+                            // 尝试将插件返回的字符串解析为 JSON
                             try {
                                 response["result"] = json::parse(res_ptr);
                                 response["result"]["isError"] = false;
                             } catch (const json::parse_error& e) {
+                                // 解析失败：返回错误提示
                                 response["result"]["isError"] = true;
                                 response["result"]["content"] = json::array();
                                 response["result"]["content"].push_back({{"type", "text"}, {"text", "Plugin returned malformed data."}});
                             }
-                            // --- Free the allocated memory ---
+                            // 释放插件分配的 C 字符串内存
                             delete[] res_ptr;
                         } else {
                             LOG(ERROR) << "Plugin " << pluginTool->name << " returned nullptr." << std::endl;
@@ -226,6 +238,7 @@ int main(int argc, char **argv) {
         });
         return response;
     });
+
     server->OverrideCallback("prompts/list", [&loader](const json& request) {
         nlohmann::ordered_json response = MCPBuilder::Response(request);
         response["result"]["prompts"] = json::array();
@@ -245,6 +258,7 @@ int main(int argc, char **argv) {
 
         return response;
     });
+
     server->OverrideCallback("prompts/get", [&loader](const json& request) {
         nlohmann::ordered_json response = MCPBuilder::Response(request);
 
@@ -274,6 +288,7 @@ int main(int argc, char **argv) {
 
         return response;
     });
+
     server->OverrideCallback("resources/list", [&loader](const json& request) {
         nlohmann::ordered_json response = MCPBuilder::Response(request);
         response["result"]["resources"] = json::array();
@@ -294,6 +309,7 @@ int main(int argc, char **argv) {
 
         return response;
     });
+    
     server->OverrideCallback("resources/read", [&loader](const json& request) {
         nlohmann::ordered_json response = MCPBuilder::Response(request);
 

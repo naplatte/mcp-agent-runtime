@@ -62,6 +62,7 @@ namespace vx::mcp {
         Stop();
     }
 
+    // 写线程，当队列为空时，该线程等待；当队列有通知时，将其写回给client
     void Server::WriterLoop() {
         LOG(INFO) << "Writer thread started." << std::endl;
         while (writer_running_.load()) {
@@ -113,7 +114,7 @@ namespace vx::mcp {
         transport_ = transport; // Store the transport pointer
         isStopping_ = false; // Reset stopping flag
 
-        // Start the writer thread
+        // 启动写指针
         writer_running_ = true;
         writer_thread_ = std::thread(&Server::WriterLoop, this);
 
@@ -123,6 +124,7 @@ namespace vx::mcp {
             return false;
         }
 
+        // 循环读取请求
         while (!isStopping_) {
             auto [length, json_string] = transport->Read();
             if (isStopping_) break;
@@ -134,11 +136,16 @@ namespace vx::mcp {
             }
 
             try {
+                // 解析请求json
                 if (json_string.empty()) continue;
                 LOG(DEBUG) << "Received: " << json_string << std::endl;
                 json request = json::parse(json_string);
                 parserErrors_ = 0; // reset parser error
+
+                // 调用HandleRequest()
                 json response = HandleRequest(request);
+
+                // 将response写回给client
                 if (response != nullptr) {
                     std::lock_guard<std::mutex> lock(output_mutex_);
                     LOG(DEBUG) << "Sending Response: " << response.dump() << std::endl;
@@ -257,7 +264,7 @@ namespace vx::mcp {
             std::lock_guard<std::mutex> lock(output_mutex_);
             notification_queue_.emplace(notification);
         }
-        queue_cv_.notify_one(); // Notify the writer thread
+        queue_cv_.notify_one(); // 唤醒写线程
     }
 
     json Server::HandleRequest(const json &request) {
@@ -268,12 +275,12 @@ namespace vx::mcp {
             LOG(DEBUG) << "=== Request END ===" << std::endl;
         }
 
-        // mandatory checks
+        // 检查request中是否有method字段
         if (!request.contains("method")) {
             return MCPBuilder::Error(MCPBuilder::InvalidRequest, request["id"], "Missing method");
         }
 
-        // handle command
+        // 在 functionMap 里找 handler
         std::string methodName = request["method"];
         auto it = functionMap.find(methodName);
         if (it != functionMap.end()) {
@@ -294,6 +301,7 @@ namespace vx::mcp {
     }
 
     bool Server::OverrideCallback(const std::string &method, std::function<json(const json &)> function) {
+        // 在路由表中找到该方法（我们定义过）
         if (functionMap.find(method) != functionMap.end()) {
             functionMap[method] = std::move(function);
             return true;
@@ -301,41 +309,42 @@ namespace vx::mcp {
         return false;
     }
 
+    // 处理 mcp initialize 请求：解析客户端参数并返回服务端能力声明
     json Server::InitializeCmd(const json &request) {
         LOG(INFO) << "InitializeCommand" << std::endl;
         if (request.contains("params")) {
             json params = request["params"];
 
-            // Access rootUri
+    // 解析 client 初始化参数，并记录一些调试信息。
+            // 工作区根路径
             if (params.contains("rootUri")) {
                 std::string rootUri = params["rootUri"].get<std::string>();
                 LOG(INFO) << "rootUri: " << rootUri << std::endl;
             }
 
-            // Access rootPath (deprecated)
+            // rootPath（已废弃，保留兼容）
             if (params.contains("rootPath")) {
                 std::string rootPath = params["rootPath"].get<std::string>();
                 LOG(INFO) << "rootPath: " << rootPath << std::endl;
             }
 
-            // Access initializationOptions
+            // 初始化选项，可携带自定义配置
             if (params.contains("initializationOptions")) {
                 json initializationOptions = params["initializationOptions"];
-                // Access specific initialization options as needed
                 LOG(INFO) << "initializationOptions: " << initializationOptions.dump() << std::endl;
             }
 
-            // Access capabilities
+            // 客户端能力集：工作区、文档同步、补全等
             if (params.contains("capabilities")) {
                 json capabilities = params["capabilities"];
 
-                // Access workspace capabilities
+                // 是否支持多工作区文件夹
                 if (capabilities.contains("workspace") && capabilities["workspace"].contains("workspaceFolders")) {
                     bool workspaceFolders = capabilities["workspace"]["workspaceFolders"].get<bool>();
                     LOG(INFO) << "workspaceFolders: " << workspaceFolders << std::endl;
                 }
 
-                // Access textDocument capabilities
+                // 文档同步方式（全量 / 增量）
                 if (capabilities.contains("textDocument") && capabilities["textDocument"].contains("synchronization")) {
                     json synchronization = capabilities["textDocument"]["synchronization"];
                     if (synchronization.contains("didChange") && synchronization["didChange"].contains("synchronizationKind")){
@@ -344,7 +353,7 @@ namespace vx::mcp {
                     }
                 }
 
-                // Access completion capabilities
+                // 补全项能力（如是否支持 snippet）
                 if (capabilities.contains("textDocument") && capabilities["textDocument"].contains("completion") && capabilities["textDocument"]["completion"].contains("completionItem")) {
                     json completionItem = capabilities["textDocument"]["completion"]["completionItem"];
                     if (completionItem.contains("snippetSupport")){
@@ -354,13 +363,13 @@ namespace vx::mcp {
                 }
             }
 
-            // Access trace
+            // 日志追踪级别
             if (params.contains("trace")) {
                 std::string trace = params["trace"].get<std::string>();
                 LOG(INFO) << "trace: " << trace << std::endl;
             }
 
-            // Access workspaceFolders array
+            // 工作区文件夹列表
             if (params.contains("workspaceFolders")) {
                 json workspaceFoldersArray = params["workspaceFolders"];
                 for (const auto& folder : workspaceFoldersArray) {
@@ -370,12 +379,14 @@ namespace vx::mcp {
                 }
             }
         }
+
+    // 构造 initialize 响应json，声明服务端提供的能力
         nlohmann::ordered_json response = {};
         response["jsonrpc"] = "2.0";
         response["id"] = request["id"];
         response["result"]["protocolVersion"] = request["params"]["protocolVersion"];
-        /// TODO: the "listChanged" parameter actually broke the Claude Desktop
-        /// should we check the the protocol version ???
+        /// TODO: "listChanged" 参数会导致 Claude Desktop 崩溃
+        /// 是否需要根据协议版本号做判断？
         response["result"]["capabilities"]["tools"] = json::object();
         response["result"]["capabilities"]["prompts"] = json::object();
         response["result"]["capabilities"]["resources"]["subscribe"] = true;

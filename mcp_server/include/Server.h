@@ -58,11 +58,15 @@ namespace vx::mcp {
         inline bool IsValid() { return transport_ != nullptr; }
         inline void VerboseLevel(int level) { verboseLevel_ = level; }
         inline void Name(const std::string& name) { name_ = name; }
-        bool OverrideCallback(const std::string &method, std::function<json(const json&)> function);
+
+        // server.cpp中实现的Overridecallback，实际上是定义了一个框架,在main.cpp中才真正为这个框架里面去装东西
+        bool OverrideCallback(const std::string &method, std::function<json(const json&)> function); 
+
+        // 将插件要发给client的message，放在server的队列中等待后台写进程发送
         void SendNotification(const std::string& pluginName, const char* notification);
 
     private:
-        void WriterLoop();
+        void WriterLoop(); // 写线程，当队列为空时，该线程等待；当队列有通知时，将其写回给client
         json HandleRequest(const json& request);
 
         json InitializeCmd(const json& request);
