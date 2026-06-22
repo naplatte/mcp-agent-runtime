@@ -43,7 +43,7 @@ namespace vx::mcp {
         Server();
         ~Server();
 
-        // Make Server non-copyable and non-movable for simplicity with threads/mutexes
+        // Server 内部包含线程和互斥量，禁止拷贝和移动以简化资源管理
         Server(const Server&) = delete;
         Server& operator=(const Server&) = delete;
         Server(Server&&) = delete;
@@ -102,9 +102,9 @@ namespace vx::mcp {
         int parserErrors_ = 0;
         std::string name_ = "mcp-server";
 
-        std::shared_ptr<ITransport> transport_; // Store transport pointer
+        std::shared_ptr<ITransport> transport_; // 保存传输层指针
         std::queue<std::string> notification_queue_;
-        std::mutex output_mutex_; // Protects both queue and transport writes
+        std::mutex output_mutex_; // 保护通知队列和传输写入
         std::condition_variable queue_cv_;
         std::thread writer_thread_;
         std::atomic<bool> writer_running_{false};

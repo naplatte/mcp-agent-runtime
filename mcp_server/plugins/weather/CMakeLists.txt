@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-# Weather plugin library
+# Weather 插件库
 add_library(weather SHARED
     ${PROJECT_SOURCE_DIR}/plugins/weather/Weather.cpp
 )

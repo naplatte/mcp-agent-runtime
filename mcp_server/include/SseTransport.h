@@ -51,15 +51,15 @@ namespace vx::transport {
         explicit SSE(int port = 8080, std::string  host = "127.0.0.1");
         ~SSE();
 
-        // Copy const. and assignment disabled
+        // 禁止拷贝构造和拷贝赋值
         SSE(const SSE&) = delete;
         SSE& operator=(const SSE&) = delete;
 
-        // Move semantics disabled
+        // 禁止移动构造和移动赋值
         SSE(SSE&&) = delete;
         SSE& operator=(SSE&&) = delete;
 
-        // Transport interface
+        // 传输层接口
         std::pair<size_t, std::string> Read() override;
         void Write(const std::string& json_data) override;
 
@@ -89,7 +89,7 @@ namespace vx::transport {
         std::atomic<bool> server_running_ {false};
         std::atomic<bool> client_connected_ {false};
 
-        // Message queues for bidirectional connections
+        // 双向连接的消息队列
         std::queue<std::string> incoming_messages_;
         std::queue<std::string> outgoing_messages_;
         std::mutex incoming_mutex_;
@@ -97,7 +97,7 @@ namespace vx::transport {
         std::condition_variable incoming_cv_;
         std::condition_variable outgoing_cv_;
 
-        // SSE connection management
+        // SSE 连接管理
         std::atomic<bool> sse_active_ {false};
     };
 

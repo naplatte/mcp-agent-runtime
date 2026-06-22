@@ -38,7 +38,7 @@ namespace vx::mcp {
                 if (entry.is_regular_file()) {
                     std::string extension = entry.path().extension().string();
 
-                    // Check if this is a shared library
+                    // 检查是否为共享库
                     if (extension == ".so")
                     {
                         LoadPlugin(entry.path().string());
@@ -56,7 +56,7 @@ namespace vx::mcp {
         PluginEntry entry;
         entry.path = path;
 
-        // Load the shared library
+        // 加载共享库
         entry.handle = dlopen(path.c_str(), RTLD_LAZY);
         if (!entry.handle) {
             LOG(ERROR) << "Failed to load plugin: " << path << " - " << dlerror() << std::endl;
@@ -68,7 +68,7 @@ namespace vx::mcp {
         entry.createFunc = (PluginAPI * (*)())dlsym(entry.handle, "CreatePlugin");
         entry.destroyFunc = (void (*)(PluginAPI *))dlsym(entry.handle, "DestroyPlugin");
 
-        // Check if required functions were found
+        // 检查是否找到了必需函数
         if (!entry.createFunc || !entry.destroyFunc) {
             LOG(ERROR) << "Plugin does not export required functions: " << path << std::endl;
 
@@ -107,15 +107,15 @@ namespace vx::mcp {
 
     void PluginsLoader::UnloadPlugin(PluginEntry& entry) {
         if (entry.instance) {
-            // Shutdown the plugin
+            // 关闭插件
             entry.instance->Shutdown();
 
-            // Destroy the plugin instance
+            // 销毁插件实例
             entry.destroyFunc(entry.instance);
             entry.instance = nullptr;
         }
 
-        // Unload the library
+        // 卸载动态库
         if (entry.handle) {
             dlclose(entry.handle);
             entry.handle = nullptr;

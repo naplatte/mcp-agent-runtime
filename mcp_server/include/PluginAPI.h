@@ -43,13 +43,13 @@ typedef enum {
 typedef struct {
     const char* name;
     const char* description;
-    const char* inputSchema;  // JSON schema as a string
+    const char* inputSchema;  // 字符串形式的 JSON schema
 } PluginTool;
 
 typedef struct {
     const char* name;
     const char* description;
-    const char* arguments;  // JSON arguments as a string
+    const char* arguments;  // 字符串形式的 JSON 参数
 } PluginPrompt;
 
 typedef struct {
@@ -60,7 +60,7 @@ typedef struct {
 } PluginResource;
 
 typedef struct {
-    ClientNotificationCallback SendToClient;    // you should not touch this
+    ClientNotificationCallback SendToClient;    // 由 server 注入，插件侧不应修改
 } NotificationSystem;
 
 typedef struct {

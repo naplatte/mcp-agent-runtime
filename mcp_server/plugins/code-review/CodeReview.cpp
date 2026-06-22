@@ -103,5 +103,5 @@ extern "C" PLUGIN_API PluginAPI* CreatePlugin() {
 }
 
 extern "C" PLUGIN_API void DestroyPlugin(PluginAPI*) {
-    // Nothing to clean up for this example
+    // 该示例无需清理资源
 }

@@ -55,7 +55,7 @@ namespace vx::mcp {
         PluginsLoader();
         ~PluginsLoader();
 
-        // Load plugins from a directory
+        // 从目录中加载插件
         bool LoadPlugins(const std::string& directory);
 
         // 卸载所有插件

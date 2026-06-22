@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-# Bacio-quote plugin library
+# Bacio-quote 插件库
 add_library(bacio-quote SHARED
         ${PROJECT_SOURCE_DIR}/plugins/bacio-quote/BacioQuote.cpp
 )

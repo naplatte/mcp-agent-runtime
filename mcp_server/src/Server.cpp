@@ -69,37 +69,34 @@ namespace vx::mcp {
             std::string notification_to_send;
             {
                 std::unique_lock<std::mutex> lock(output_mutex_);
-                // Wait until queue is not empty OR the writer should stop
+                // 等待队列非空，或写线程需要停止
                 queue_cv_.wait(lock, [this] { return !notification_queue_.empty() || !writer_running_.load(); });
 
-                // Check running flag again after waking up
+                // 唤醒后再次检查运行标志
                 if (!writer_running_.load() && notification_queue_.empty()) {
-                    break; // Exit loop if stopped and queue is empty
+                    break; // 如果已经停止且队列为空，则退出循环
                 }
 
                 if (!notification_queue_.empty()) {
                     notification_to_send = std::move(notification_queue_.front());
                     notification_queue_.pop();
                 }
-            } // Release lock before potentially blocking write
+            } // 在可能阻塞的写操作前释放锁
 
             if (!notification_to_send.empty() && transport_) {
                 try {
-                    // Note: Write itself is not locked here, assuming transport handles internal sync
-                    // If transport->Write is not thread-safe, the lock needs to span this call too.
-                    // For stdio, writing from one thread should be okay, but locking provides safety.
-                    // Re-locking here for safety with potential other writes (responses).
+                    // 这里重新加锁，避免通知写入和响应写入并发交叉
                     std::lock_guard<std::mutex> write_lock(output_mutex_);
-                    if (transport_) { // Check transport again after potential delay
+                    if (transport_) { // 延迟后再次检查 transport 是否仍然有效
                         LOG(DEBUG) << "Sending Notification: " << notification_to_send << std::endl;
                         transport_->Write(notification_to_send);
                     }
                 } catch (const std::exception& e) {
                     LOG(ERROR) << "Error writing notification: " << e.what() << std::endl;
-                    // Decide how to handle write errors (e.g., log, ignore, stop?)
+                    // 写入失败时目前只记录日志，后续可按需要决定是否停止服务
                 }
             }
-            // Small sleep to prevent tight loop if errors occur rapidly
+            // 短暂休眠，避免错误频繁发生时进入紧密循环
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         LOG(INFO) << "Writer thread stopped." << std::endl;
@@ -111,14 +108,14 @@ namespace vx::mcp {
             return false;
         }
 
-        transport_ = transport; // Store the transport pointer
-        isStopping_ = false; // Reset stopping flag
+        transport_ = transport; // 保存传输层指针
+        isStopping_ = false; // 重置停止标志
 
         // 启动写指针
         writer_running_ = true;
         writer_thread_ = std::thread(&Server::WriterLoop, this);
 
-        // Start transport (required for SSE; should be a no-op/true for stdio)
+        // 启动传输层；SSE 需要真正启动服务，stdio 通常直接返回 true
         if (!transport_->Start()) {
             LOG(ERROR) << "Failed to start transport: " << transport_->GetName() << std::endl;
             return false;
@@ -140,7 +137,7 @@ namespace vx::mcp {
                 if (json_string.empty()) continue;
                 LOG(DEBUG) << "Received: " << json_string << std::endl;
                 json request = json::parse(json_string);
-                parserErrors_ = 0; // reset parser error
+                parserErrors_ = 0; // 重置解析错误计数
 
                 // 调用HandleRequest()
                 json response = HandleRequest(request);
@@ -152,8 +149,7 @@ namespace vx::mcp {
                     transport_->Write(response.dump());
                 }
             } catch (json::parse_error &e) {
-                // ok... what should we do in this case ? exit process ? does nothing ?
-                // for now, we manage a max parser consecutive errors
+                // 解析失败时暂不退出进程，只限制连续解析错误次数
                 LOG(ERROR) << "Error parsing JSON: " << e.what() << std::endl;
                 if (++parserErrors_ > MAX_PARSER_ERRORS) return false;
             }
@@ -173,11 +169,11 @@ namespace vx::mcp {
         transport_ = transport;
         isStopping_ = false;
 
-        // Start the writer thread
+        // 启动写线程
         writer_running_ = true;
         writer_thread_ = std::thread(&Server::WriterLoop, this);
 
-        // Start the async reader thread
+        // 启动异步读线程
         reader_running_ = true;
         reader_thread_ = std::thread([this]() {
             LOG(INFO) << "Async Reader thread started." << std::endl;
@@ -227,7 +223,7 @@ namespace vx::mcp {
 
         isStopping_ = true;
 
-        // Stop transport (SSE shuts server down; stdio can no-op)
+        // 停止传输层；SSE 会关闭服务，stdio 可以是空操作
         if (transport_) {
             LOG(INFO) << "Stopping transport..." << std::endl;
             transport_->Stop();
@@ -235,15 +231,15 @@ namespace vx::mcp {
             LOG(INFO) << "Transport stopped." << std::endl;
         }
 
-        // Signal and join writer thread
+        // 通知并等待写线程退出
         writer_running_ = false;
-        queue_cv_.notify_one(); // Wake up the writer thread if waiting
+        queue_cv_.notify_one(); // 如果写线程正在等待，则唤醒它
         if (writer_thread_.joinable()) {
             writer_thread_.join();
             LOG(INFO) << "Writer thread joined." << std::endl;
         }
 
-        // Join reader thread if async
+        // 如果异步读线程存在，则等待它退出
         reader_running_ = false;
         if (reader_thread_.joinable()) {
             reader_thread_.join();
@@ -259,7 +255,7 @@ namespace vx::mcp {
             return;
         }
 
-        // Add notification to the queue (protected by the mutex)
+        // 将通知加入队列，并用互斥量保护
         {
             std::lock_guard<std::mutex> lock(output_mutex_);
             notification_queue_.emplace(notification);
@@ -268,7 +264,7 @@ namespace vx::mcp {
     }
 
     json Server::HandleRequest(const json &request) {
-        // log the request
+        // 记录请求
         if (verboseLevel_ == 1) {
             LOG(DEBUG) << "=== Request START ===" << std::endl;
             LOG(DEBUG) << request.dump(4) << std::endl;
@@ -295,7 +291,7 @@ namespace vx::mcp {
             return response;
         }
 
-        // handle method not found case
+        // 处理找不到 method 的情况
         int id = request["id"];
         return MCPBuilder::Error(MCPBuilder::MethodNotFound, std::to_string(id), "Method not found");
     }
@@ -517,7 +513,7 @@ namespace vx::mcp {
         isStopping_ = true;
         LOG(INFO) << "Stopping async server..." << std::endl;
 
-        // Stop writer thread
+        // 停止写线程
         writer_running_ = false;
         queue_cv_.notify_one();
         if (writer_thread_.joinable()) {
@@ -525,7 +521,7 @@ namespace vx::mcp {
             LOG(INFO) << "Writer thread joined." << std::endl;
         }
 
-        // Stop reader thread
+        // 停止读线程
         reader_running_ = false;
         if (reader_thread_.joinable()) {
             reader_thread_.join();

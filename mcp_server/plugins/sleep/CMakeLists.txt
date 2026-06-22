@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-# Sleep plugin library
+# Sleep 插件库
 add_library(sleep SHARED
         ${PROJECT_SOURCE_DIR}/plugins/sleep/Sleep.cpp
 )

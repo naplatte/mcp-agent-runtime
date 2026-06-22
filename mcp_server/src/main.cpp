@@ -43,7 +43,7 @@ struct NotificationState {
 };
 NotificationState notificationState;
 
-/// stop handler Ctrl+C
+/// Ctrl+C 停止处理函数
 void stop_handler(sig_atomic_t s) {
     std::cout <<"Stopping server..." << std::endl;
     if (server && server->IsValid()) {
@@ -53,7 +53,7 @@ void stop_handler(sig_atomic_t s) {
     exit(0);
 }
 
-/// Notification Implementation from plugins to mcp-client
+/// 插件到 mcp-client 的通知转发实现
 void ClientNotificationCallbackImpl(const char* pluginName, const char* notification) {
     std::lock_guard<std::mutex> lock(notificationState.serverNotificationMutex);
     if (server && server->IsValid()) {
@@ -61,7 +61,7 @@ void ClientNotificationCallbackImpl(const char* pluginName, const char* notifica
     }
 }
 
-/// main entry point
+/// 主入口
 int main(int argc, char **argv) {
     std::string name;
     std::string plugins_directory;
@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
     server = std::make_shared<vx::mcp::Server>();
 
     //============================================================================================
-    // setup signal handler (Ctrl+C)
+    // 设置信号处理函数（Ctrl+C）
     //============================================================================================
     signal(SIGINT, stop_handler);
 
@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
     verbose_option->assign_to(&verbose);
 
     //============================================================================================
-    // parse options
+    // 解析命令行选项
     //============================================================================================
     try {
         op.parse(argc, argv);
@@ -123,20 +123,20 @@ int main(int argc, char **argv) {
     //============================================================================================
     // 初始化日志
     //============================================================================================
-    // Get the current time as ISO 8601 string
+    // 获取当前时间并格式化为 ISO 8601 字符串
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
     ss << std::put_time(std::gmtime(&time_t_now), "%Y-%m-%dT%H-%M-%S");
     std::string iso_date = ss.str();
 
-    // Concatenate ISO date to logname
+    // 将 ISO 日期拼接到日志文件名中
     std::string logFilename = logs_directory + "/mcp-server_" + iso_date + ".log";
     auto sink_file = std::make_shared<AixLog::SinkFile>(AixLog::Severity::trace, logFilename);
     AixLog::Log::init({sink_file});
 
     //============================================================================================
-    // print logo and info
+    // 打印 logo 和启动信息
     //============================================================================================
     LOG(INFO) << " __  __  _____ _____        _____ ______ _______      ________ _____  " << std::endl;
     LOG(INFO) << "|  \\/  |/ ____|  __ \\      / ____|  ____|  __ \\ \\    / /  ____|  __ \\ " << std::endl;
@@ -163,7 +163,7 @@ int main(int argc, char **argv) {
     }
 
     //============================================================================================
-    // start server
+    // 启动 server
     //============================================================================================
     server->Name(name);
     server->VerboseLevel(verbose ? 1 : 0);
@@ -275,9 +275,9 @@ int main(int argc, char **argv) {
                                 response["result"] = json::parse(res_ptr);
                             } catch (const json::parse_error& e) {
                                 LOG(ERROR) << "Plugin " << pluginPrompt->name << " returned malformed data." << std::endl;
-                                // TODO: how can we handle error here ?
+                                // TODO: 这里应该如何处理错误？
                             }
-                            // --- Free the allocated memory ---
+                            // --- 释放已分配内存 ---
                             delete[] res_ptr;
                         }
                     }
@@ -326,9 +326,9 @@ int main(int argc, char **argv) {
                                 response["result"] = json::parse(res_ptr);
                             } catch (const json::parse_error& e) {
                                 LOG(ERROR) << "Plugin " << pluginResource->name << " returned malformed data." << std::endl;
-                                // TODO: how can we handle error here ?
+                                // TODO: 这里应该如何处理错误？
                             }
-                            // --- Free the allocated memory ---
+                            // --- 释放已分配内存 ---
                             delete[] res_ptr;
                         }
                     }

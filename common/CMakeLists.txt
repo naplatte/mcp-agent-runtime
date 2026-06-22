@@ -5,7 +5,7 @@ set(COMMON_SOURCES
     src/logger.cpp
 )
 
-# 将common source(logger.cpp)编译为一个静态库
+# 将 common 源文件 logger.cpp 编译为一个静态库
 add_library(mcp_common STATIC ${COMMON_SOURCES}) 
 
 # 设置头文件目录 common/include

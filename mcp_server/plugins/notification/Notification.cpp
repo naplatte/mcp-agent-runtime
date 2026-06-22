@@ -22,7 +22,7 @@
 //  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 
-// ***** THIS PLUGIN IS IN THE DEVELOPMENT STAGE COULD NOT WORK... *****
+// ***** 该插件仍处于开发阶段，可能无法正常工作 *****
 
 #include <thread>
 #include "PluginAPI.h"
@@ -76,7 +76,7 @@ char* HandleRequestImpl(const char* req) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     } else if (request["params"]["name"] == "progress_test") {
-        // Total duration in seconds
+        // 总耗时，单位为秒
         const int totalDuration = 10;
 
         if (!request["params"].contains("_meta") || !request["params"]["_meta"].contains("progressToken")) {
@@ -95,17 +95,17 @@ char* HandleRequestImpl(const char* req) {
 
         if (g_plugin) {
             for (int i = 1; i <= totalDuration; i++) {
-                // Wait for 1 second
+                // 等待 1 秒
                 std::this_thread::sleep_for(std::chrono::seconds(1));
 
-                // Calculate progress percentage
+                // 计算进度百分比
                 int progressPercent = (i * 100) / totalDuration;
 
-                // Create a progress notification
+                // 创建进度通知
                 std::string progressMessage = "Progress: " + std::to_string(progressPercent) + "%";
                 std::string message = MCPBuilder::NotificationProgress(progressMessage, progressToken, progressPercent, 100).dump();
 
-                // Send notification to client
+                // 向 client 发送通知
                 g_plugin->notifications->SendToClient(GetNameImpl(), message.c_str());
             }
         }
@@ -158,5 +158,5 @@ extern "C" PLUGIN_API PluginAPI* CreatePlugin() {
 }
 
 extern "C" PLUGIN_API void DestroyPlugin(PluginAPI*) {
-    // Nothing to clean up for this example
+    // 该示例无需清理资源
 }

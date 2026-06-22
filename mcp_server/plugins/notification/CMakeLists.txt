@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-# Notification plugin library
+# Notification 插件库
 add_library(notification SHARED
         ${PROJECT_SOURCE_DIR}/plugins/notification/Notification.cpp
 )

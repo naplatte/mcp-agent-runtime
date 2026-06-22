@@ -198,7 +198,7 @@ namespace vx::transport {
                     client_connected_.store(false);
                     outgoing_cv_.notify_all();
                     incoming_cv_.notify_all();
-                    return false; // stop content provider
+                    return false; // 停止内容提供器
                 };
 
                 try {
@@ -214,11 +214,11 @@ namespace vx::transport {
                         last_ping = clock::now();
                     }
 
-                    // Periodically send keep-alive to detect broken connection
+                    // 定期发送保活消息，用于检测断开的连接
                     if (clock::now() - last_ping >= ping_interval) {
-                        // SSE comment line as keep-alive
+                        // 使用 SSE 注释行作为保活消息
                         const char* ping = ": ping\n\n";
-                        // If write fails, client disconnected (e.g., Ctrl+C)
+                        // 如果写入失败，说明客户端已断开（例如 Ctrl+C）
                         if (!sink.write(ping, std::strlen(ping))) {
                             LOG(ERROR) << "Keep-alive write failed; client likely disconnected" << std::endl;
                             return terminate();
@@ -226,7 +226,7 @@ namespace vx::transport {
                         last_ping = clock::now();
                     }
 
-                    // If there’s no message soon, re-check writability again
+                    // 如果短时间内没有消息，则再次检查连接是否可写
                     std::unique_lock<std::mutex> lock(outgoing_mutex_);
                     outgoing_cv_.wait_for(lock, std::chrono::milliseconds(200), [this]() {
                         return !outgoing_messages_.empty() || !sse_active_.load();
@@ -237,10 +237,10 @@ namespace vx::transport {
                         return terminate();
                     }
 
-                    // Before sending, verify connection looks writable
-                    // If the client Ctrl+C'd, this check or the subsequent write will fail.
-                    // Note: is_writable() exists on cpp-httplib DataSink; if missing on your version,
-                    // the failed write below will handle it.
+                    // 发送前先确认连接看起来仍可写
+                    // 如果客户端已 Ctrl+C 退出，此检查或后续写入会失败
+                    // is_writable() 来自 cpp-httplib 的 DataSink；如果当前版本没有该接口，
+                    // 后面的写入失败也会处理这种情况
 #ifdef CPPHTTPLIB_HAS_SINK_IS_WRITABLE
                     if (!sink.is_writable()) {
                         LOG(DEBUG) << "Sink no longer writable; client likely disconnected" << std::endl;
@@ -262,7 +262,7 @@ namespace vx::transport {
                         }
                     }
 
-                    return true; // continue streaming
+                    return true; // 继续流式传输
                 } catch (const std::exception& ex) {
                     LOG(ERROR) << "Exception in SSE content provider: " << ex.what() << std::endl;
                     return terminate();

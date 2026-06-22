@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-# Code-review plugin library
+# Code-review 插件库
 add_library(codereview SHARED
         ${PROJECT_SOURCE_DIR}/plugins/code-review/CodeReview.cpp
 )

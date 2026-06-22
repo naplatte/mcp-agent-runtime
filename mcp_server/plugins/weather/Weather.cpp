@@ -66,24 +66,24 @@ char* HandleRequestImpl(const char* req) {
     httplib::Client cli("api.open-meteo.com");
     auto res = cli.Get("/v1/forecast?latitude=" + latitude + "&longitude=" + longitude + "&hourly=temperature_2m&forecast_days=1");
     if (res && res->status == 200) {
-        // Parse the response from the weather API
+        // 解析天气 API 的响应
         auto weatherData = json::parse(res->body);
 
-        // Extract city name from the request
+        // 从请求中提取城市名
         auto city = request["params"]["arguments"]["city"].get<std::string>();
 
-        // Create a human-readable message
+        // 创建便于阅读的天气消息
         std::stringstream weatherMessage;
         weatherMessage << "Weather Forecast for " << city << ":\n\n";
 
-        // Get the temperature data and time
+        // 获取温度数据和时间
         auto times = weatherData["hourly"]["time"];
         auto temperatures = weatherData["hourly"]["temperature_2m"];
 
-        // Format the forecast in a human-friendly way
+        // 以便于阅读的方式格式化预报
         weatherMessage << "Today's Temperature Forecast:\n";
 
-        // Morning (6 AM - 12 PM)
+        // 上午（6 点到 12 点）
         weatherMessage << "🌅 Morning: ";
         double morningTemp = 0.0;
         int morningCount = 0;
@@ -94,7 +94,7 @@ char* HandleRequestImpl(const char* req) {
         morningTemp /= morningCount;
         weatherMessage << std::fixed << std::setprecision(1) << morningTemp << "°C\n";
 
-        // Afternoon (12 PM - 6 PM)
+        // 下午（12 点到 18 点）
         weatherMessage << "☀️ Afternoon: ";
         double afternoonTemp = 0.0;
         int afternoonCount = 0;
@@ -105,7 +105,7 @@ char* HandleRequestImpl(const char* req) {
         afternoonTemp /= afternoonCount;
         weatherMessage << std::fixed << std::setprecision(1) << afternoonTemp << "°C\n";
 
-        // Evening (6 PM - 12 AM)
+        // 晚上（18 点到 24 点）
         weatherMessage << "🌙 Evening: ";
         double eveningTemp = 0.0;
         int eveningCount = 0;
@@ -116,7 +116,7 @@ char* HandleRequestImpl(const char* req) {
         eveningTemp /= eveningCount;
         weatherMessage << std::fixed << std::setprecision(1) << eveningTemp << "°C\n\n";
 
-        // Find highest and lowest temperatures of the day
+        // 查找当天最高温和最低温
         double maxTemp = temperatures[0].get<double>();
         double minTemp = temperatures[0].get<double>();
         std::string maxTime, minTime;
@@ -125,18 +125,18 @@ char* HandleRequestImpl(const char* req) {
             double temp = temperatures[i].get<double>();
             if (temp > maxTemp) {
                 maxTemp = temp;
-                maxTime = times[i].get<std::string>().substr(11, 5); // Extract HH:MM
+                maxTime = times[i].get<std::string>().substr(11, 5); // 提取 HH:MM
             }
             if (temp < minTemp) {
                 minTemp = temp;
-                minTime = times[i].get<std::string>().substr(11, 5); // Extract HH:MM
+                minTime = times[i].get<std::string>().substr(11, 5); // 提取 HH:MM
             }
         }
 
         weatherMessage << "🔼 Highest: " << std::fixed << std::setprecision(1) << maxTemp << "°C at " << maxTime << "\n";
         weatherMessage << "🔽 Lowest: " << std::fixed << std::setprecision(1) << minTemp << "°C at " << minTime << "\n\n";
 
-        // Add overall daily summary
+        // 添加全天总体摘要
         weatherMessage << "📊 Daily Summary: ";
         if (maxTemp > 25) {
             weatherMessage << "Hot day! ";
@@ -148,7 +148,7 @@ char* HandleRequestImpl(const char* req) {
             weatherMessage << "Cool day. ";
         }
 
-        // Add temperature variation description
+        // 添加温差描述
         double tempVariation = maxTemp - minTemp;
         if (tempVariation > 10) {
             weatherMessage << "Large temperature variation throughout the day.";
@@ -210,5 +210,5 @@ extern "C" PLUGIN_API PluginAPI* CreatePlugin() {
 }
 
 extern "C" PLUGIN_API void DestroyPlugin(PluginAPI*) {
-    // Nothing to clean up for this example
+    // 该示例无需清理资源
 }

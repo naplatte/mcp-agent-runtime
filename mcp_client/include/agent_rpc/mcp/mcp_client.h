@@ -32,7 +32,7 @@ struct MCPTool {
 struct MCPPrompt {
     std::string name;
     std::string description;
-    std::string arguemnts;  // JSON arguments
+    std::string arguemnts;  // JSON 参数
 };
 
 // MCP资源数据结构定义
@@ -169,7 +169,7 @@ private:
     int stdout_pipe_{-1};
     
     // SSE 模式相关
-    void* curl_handle_{nullptr};        // CURL handle
+    void* curl_handle_{nullptr};        // CURL 句柄
     std::string sse_session_id_;        // SSE 会话 ID
     std::string sse_response_buffer_;   // SSE 响应缓冲
     std::thread sse_event_thread_;      // SSE 事件监听线程

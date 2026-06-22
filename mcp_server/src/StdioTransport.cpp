@@ -32,7 +32,7 @@ namespace vx::transport {
         std::string line;
         std::string json_data;
 
-        // Read headers until an empty line
+        // 读取输入直到行结束
         while (true) {
             int c;
             while ((c = std::getc(stdin)) != EOF && c != '\n') {

@@ -204,12 +204,12 @@ char* HandleRequestImpl(const char* req) {
     auto request = json::parse(req);
     nlohmann::json response = json::object();
 
-    // Generate a random index to select a message
+    // 生成随机索引用于选择一条消息
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> distr(0, messages.size() - 1);
 
-    // Build response
+    // 构造响应
     nlohmann::json contents = json::array();
     contents.push_back(MCPBuilder::ResourceText(resources[0].uri, resources[0].mime, messages[distr(gen)]));
     response["contents"] = contents;
@@ -253,5 +253,5 @@ extern "C" PLUGIN_API PluginAPI* CreatePlugin() {
 }
 
 extern "C" PLUGIN_API void DestroyPlugin(PluginAPI*) {
-    // Nothing to clean up for this example
+    // 该示例无需清理资源
 }
