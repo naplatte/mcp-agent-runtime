@@ -29,6 +29,9 @@
 #include "json.hpp"
 #include "MCPBuilder.h"
 
+// 意大利语问答
+
+// 插件自己的数据源
 std::vector<std::string> messages = {
             "Amor che nella mente mi ragiona cominciò egli a dir si dolcemente che la dolcezza ancor dentro mi suona. (Dante)",
             "Che cosa sarebbe l'umanità, signore, senza la donna? Sarebbe scarsa, signore, terribilmente scarsa. (Mark Twain)",

@@ -39,12 +39,13 @@ typedef void* LibraryHandle;
 
 namespace vx::mcp {
 
+    // 一个已加载插件的信息
     struct PluginEntry {
         std::string path;
-        LibraryHandle handle;
-        PluginAPI* instance;
+        LibraryHandle handle; // 句柄 (类似文件句柄，os给已打开动态库的“凭证”)
+        PluginAPI* instance; // 插件实例
 
-        // Function pointers
+        // 函数指针
         PluginAPI* (*createFunc)();
         void (*destroyFunc)(PluginAPI*);
     };
@@ -57,10 +58,10 @@ namespace vx::mcp {
         // Load plugins from a directory
         bool LoadPlugins(const std::string& directory);
 
-        // Unload all plugins
+        // 卸载所有插件
         void UnloadPlugins();
 
-        // Get loaded plugins
+        // 获取已加载的插件
         const std::vector<PluginEntry>& GetPlugins() const;
 
     private:

@@ -148,7 +148,7 @@ static long long factorial(int n) {
     return result;
 }
 
-// 工具定义
+// 工具定义 声明这个插件提供哪些tools 每个tools都包含name des inputSchema
 static PluginTool methods[] = {
     {"calculator", "Evaluates a mathematical expression", 
      "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Math expression\"}},\"required\":[\"expression\"]}"},
@@ -168,6 +168,7 @@ static PluginTool methods[] = {
      "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":20}},\"required\":[\"n\"]}"}
 };
 
+// 插件基础信息函数
 const char* GetNameImpl() { return "calculator-tools"; }
 const char* GetVersionImpl() { return "1.0.0"; }
 PluginType GetTypeImpl() { return PLUGIN_TYPE_TOOLS; }
@@ -260,12 +261,15 @@ char* HandleRequestImpl(const char* req) {
 }
 
 void ShutdownImpl() {}
+
+// 给 tools/list 用
 int GetToolCountImpl() { return sizeof(methods) / sizeof(methods[0]); }
 const PluginTool* GetToolImpl(int index) {
     if (index < 0 || index >= GetToolCountImpl()) return nullptr;
     return &methods[index];
 }
 
+// 把函数装进函数指针表
 static PluginAPI plugin = {
     GetNameImpl, GetVersionImpl, GetTypeImpl, InitializeImpl,
     HandleRequestImpl, ShutdownImpl, GetToolCountImpl, GetToolImpl,

@@ -33,6 +33,7 @@ namespace vx::mcp {
 
     bool PluginsLoader::LoadPlugins(const std::string& directory) {
         try {
+            // 加载路径中的所有插件
             for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
                 if (entry.is_regular_file()) {
                     std::string extension = entry.path().extension().string();
@@ -62,7 +63,8 @@ namespace vx::mcp {
             return false;
         }
 
-        // Get function pointers
+        // 获取该插件的两个函数（以函数指针的形式获取） 
+        // dlsym:根据给定的句柄 (handle) 和符号名 (symbol)，返回该符号在内存中的地址
         entry.createFunc = (PluginAPI * (*)())dlsym(entry.handle, "CreatePlugin");
         entry.destroyFunc = (void (*)(PluginAPI *))dlsym(entry.handle, "DestroyPlugin");
 
@@ -75,10 +77,10 @@ namespace vx::mcp {
             return false;
         }
 
-        // Create plugin instance
+        // 创建插件实例
         entry.instance = entry.createFunc();
 
-        // Initialize the plugin
+        // 初始化插件
         if (!entry.instance->Initialize()) {
             LOG(ERROR) << "Plugin initialization failed: " << path << std::endl;
             entry.destroyFunc(entry.instance);
@@ -88,7 +90,7 @@ namespace vx::mcp {
             return false;
         }
 
-        // Add to a plugin list
+        // 将其添加到插件list
         m_plugins.push_back(entry);
         LOG(INFO) << "Loaded plugin: " << entry.instance->GetName()
                   << " v" << entry.instance->GetVersion() << std::endl;
