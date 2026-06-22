@@ -4,6 +4,7 @@ build/
 .vs/
 .cache/
 docs/doxygen_output/
+.cache/clangd/index/
 
 *.o
 *.obj
