@@ -69,7 +69,7 @@ namespace vx::mcp {
         void UnloadPlugin(PluginEntry& entry);
 
     private:
-        std::vector<PluginEntry> m_plugins;
+        std::vector<PluginEntry> m_plugins; // 保存所有已加载插件
     };
 
 }

@@ -116,6 +116,8 @@ namespace vx::transport {
         server_thread_ = std::thread([this]() {
             LOG(INFO) << "Starting SSE server on " << host_ << ":" << port_ << std::endl;
 
+            // 头文件说明:explicit SSE(int port = 8080, std::string  host = "127.0.0.1");
+            // 默认监听 127.0.0.1:8080
             if (!server_->listen(host_.c_str(), port_)) {
                 LOG(ERROR) << "Failed to start SSE server on " << host_ << ":" << port_ << std::endl;
                 server_running_.store(false);
@@ -152,20 +154,24 @@ namespace vx::transport {
             HandleOptionsRequest(req, res);
         });
 
+        // 收到get，执行lambda，返回一个json
         server_->Get("/health", [](const httplib::Request& req, httplib::Response& res) {
             res.set_content("{\"status\" : \"ok\"}", "application/json");
         });
 
+        // 客户端发送 POST /messages 时，把请求转交给 HandlePostMessage()
         server_->Post("/messages", [this](const httplib::Request& req, httplib::Response& res) {
             HandlePostMessage(req, res);
         });
 
+        // 客户端访问 GET /sse 时，进入 HandleSSEConnection()，建立持续推送消息的 SSE 长连接
         server_->Get("/sse", [this](const httplib::Request& req, httplib::Response& res) {
             HandleSSEConnection(req, res);
         });
     }
 
     void SSE::HandleSSEConnection(const httplib::Request& req, httplib::Response& res) {
+        // 1. 记录客户端连接信息
         LOG(DEBUG) << "SSE client connected" << std::endl;
         LOG(DEBUG) << "Request headers:" << std::endl;
         for (const auto &header: req.headers) {
@@ -177,6 +183,7 @@ namespace vx::transport {
         LOG(DEBUG) << "Request remote address: " << req.remote_addr << std::endl;
         LOG(DEBUG) << "Request remote port: " << req.remote_port << std::endl;
 
+        // 2. 设置 SSE 响应头并标记连接为活跃
         SetCORSHeaders(res);
         res.set_header("Content-Type", "text/event-stream");
         res.set_header("Cache-Control", "no-cache");
@@ -185,6 +192,7 @@ namespace vx::transport {
         client_connected_.store(true);
         sse_active_.store(true);
 
+        // 3. 注册流式响应处理器，持续向客户端推送数据
         res.set_content_provider(
             "text/event-stream",
             [this](size_t offset, httplib::DataSink& sink) -> bool {
@@ -193,15 +201,17 @@ namespace vx::transport {
                 static thread_local auto last_ping = clock::now();
                 const auto ping_interval = std::chrono::seconds(15);
 
+                // 连接结束时清理状态，并唤醒所有等待线程
                 auto terminate = [this]() -> bool {
                     sse_active_.store(false);
                     client_connected_.store(false);
                     outgoing_cv_.notify_all();
                     incoming_cv_.notify_all();
-                    return false; // 停止内容提供器
+                    return false;
                 };
 
                 try {
+                    // 4. 首次调用：生成会话 ID，并告知客户端消息提交地址
                     if (first_call) {
                         first_call = false;
 
@@ -214,11 +224,9 @@ namespace vx::transport {
                         last_ping = clock::now();
                     }
 
-                    // 定期发送保活消息，用于检测断开的连接
+                    // 5. 每 15 秒发送一次保活消息
                     if (clock::now() - last_ping >= ping_interval) {
-                        // 使用 SSE 注释行作为保活消息
                         const char* ping = ": ping\n\n";
-                        // 如果写入失败，说明客户端已断开（例如 Ctrl+C）
                         if (!sink.write(ping, std::strlen(ping))) {
                             LOG(ERROR) << "Keep-alive write failed; client likely disconnected" << std::endl;
                             return terminate();
@@ -226,7 +234,7 @@ namespace vx::transport {
                         last_ping = clock::now();
                     }
 
-                    // 如果短时间内没有消息，则再次检查连接是否可写
+                    // 6. 等待发送队列出现消息，最多等待 200ms
                     std::unique_lock<std::mutex> lock(outgoing_mutex_);
                     outgoing_cv_.wait_for(lock, std::chrono::milliseconds(200), [this]() {
                         return !outgoing_messages_.empty() || !sse_active_.load();
@@ -237,10 +245,7 @@ namespace vx::transport {
                         return terminate();
                     }
 
-                    // 发送前先确认连接看起来仍可写
-                    // 如果客户端已 Ctrl+C 退出，此检查或后续写入会失败
-                    // is_writable() 来自 cpp-httplib 的 DataSink；如果当前版本没有该接口，
-                    // 后面的写入失败也会处理这种情况
+                    // 7. 检查客户端连接是否仍可写
 #ifdef CPPHTTPLIB_HAS_SINK_IS_WRITABLE
                     if (!sink.is_writable()) {
                         LOG(DEBUG) << "Sink no longer writable; client likely disconnected" << std::endl;
@@ -248,6 +253,7 @@ namespace vx::transport {
                     }
 #endif
 
+                    // 8. 取出队列消息，包装成 SSE 格式后发送
                     if (!outgoing_messages_.empty()) {
                         std::string message = outgoing_messages_.front();
                         outgoing_messages_.pop();
@@ -262,7 +268,7 @@ namespace vx::transport {
                         }
                     }
 
-                    return true; // 继续流式传输
+                    return true; // 保持连接，继续下一轮处理
                 } catch (const std::exception& ex) {
                     LOG(ERROR) << "Exception in SSE content provider: " << ex.what() << std::endl;
                     return terminate();
@@ -277,12 +283,14 @@ namespace vx::transport {
     void SSE::HandlePostMessage(const httplib::Request& req, httplib::Response& res) {
         SetCORSHeaders(res);
 
+        // 检查客户端是否已连接
         if (!client_connected_.load()) {
             res.status = 503;
             res.set_content("{\"error\":\"No SSE connection\"}", "application/json");
             return;
         }
 
+        // 获取请求消息体
         std::string message = req.body;
         if (message.empty()) {
             res.status = 400;
@@ -290,11 +298,14 @@ namespace vx::transport {
             return;
         }
 
+        // 将消息放入income队列（互斥访问）
         LOG(DEBUG) << "Received message via POST: " << message << std::endl;
         {
             std::lock_guard<std::mutex> lock(incoming_mutex_);
             incoming_messages_.push(message);
         }
+
+        // 唤醒读线程(read())取消息
         incoming_cv_.notify_one();
 
         res.status = 200;

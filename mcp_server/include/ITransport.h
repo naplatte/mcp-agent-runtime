@@ -32,16 +32,20 @@ namespace vx {
 
     class ITransport {
     public:
+        // 生命周期
         virtual bool Start() = 0;
         virtual void Stop() = 0;
         virtual bool IsRunning() = 0;
 
+        // 读写
         virtual std::pair<size_t, std::string> Read() = 0;
         virtual void Write(const std::string& json_data) = 0;
 
+        // 异步读写
         virtual std::future<std::pair<size_t, std::string>> ReadAsync() = 0;
         virtual std::future<void> WriteAsync(const std::string& json_data) = 0;
 
+        // 基本信息
         virtual std::string GetName() = 0;
         virtual std::string GetVersion() = 0;
         virtual int GetPort() = 0;

@@ -59,27 +59,30 @@ namespace vx::transport {
         SSE(SSE&&) = delete;
         SSE& operator=(SSE&&) = delete;
 
-        // 传输层接口
+        // 读写
         std::pair<size_t, std::string> Read() override;
         void Write(const std::string& json_data) override;
 
+        // 异步读写
         std::future<std::pair<size_t, std::string>> ReadAsync() override;
         std::future<void> WriteAsync(const std::string& json_data) override;
 
+        // 基本信息
         std::string GetName() override { return "sse"; };
         std::string GetVersion() override { return "0.4"; };
         int GetPort() override { return port_; };
 
+        // 生命周期
         bool Start() override;
         void Stop() override;
         bool IsRunning() override { return server_running_.load(); }
 
     private:
-        void SetupRoutes();
-        void HandleSSEConnection(const httplib::Request& req, httplib::Response& res);
-        void HandlePostMessage(const httplib::Request& req, httplib::Response& res);
+        void SetupRoutes(); // 注册http路由
+        void HandleSSEConnection(const httplib::Request& req, httplib::Response& res); // 处理client的get请求，并建立SSE长连接
+        void HandlePostMessage(const httplib::Request& req, httplib::Response& res); // 处理post（接收client发来的请求）的方法
 
-        static void HandleOptionsRequest(const httplib::Request& req, httplib::Response& res);
+        static void HandleOptionsRequest(const httplib::Request& req, httplib::Response& res); // 处理CROS（跨域连接）预检
         static void SetCORSHeaders(httplib::Response& res);
 
         std::string host_;
@@ -92,8 +95,8 @@ namespace vx::transport {
         // 双向连接的消息队列
         std::queue<std::string> incoming_messages_;
         std::queue<std::string> outgoing_messages_;
-        std::mutex incoming_mutex_;
-        std::mutex outgoing_mutex_;
+        std::mutex incoming_mutex_; // 接收队列的互斥信号量
+        std::mutex outgoing_mutex_; // 发送队列的互斥信号量
         std::condition_variable incoming_cv_;
         std::condition_variable outgoing_cv_;
 
