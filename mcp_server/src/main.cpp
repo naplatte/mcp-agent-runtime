@@ -195,6 +195,17 @@ int main(int argc, char **argv) {
         // 构建基础响应（填充 id / jsonrpc 等字段）
         nlohmann::ordered_json response = MCPBuilder::Response(request);
 
+        // 检查 params 是否存在
+        if (!request.contains("params") || !request["params"].contains("name")) {
+            response["result"]["isError"] = true;
+            response["result"]["content"] = json::array();
+            response["result"]["content"].push_back({
+                {"type", "text"},
+                {"text", "Invalid request: missing params.name"}
+            });
+            return response;
+        }
+
         // 插件返回的原始字符串指针，由插件内部 malloc/new[] 分配
         char* res_ptr = nullptr;
 
@@ -262,6 +273,11 @@ int main(int argc, char **argv) {
     server->OverrideCallback("prompts/get", [&loader](const json& request) {
         nlohmann::ordered_json response = MCPBuilder::Response(request);
 
+        // 检查 params 是否存在
+        if (!request.contains("params") || !request["params"].contains("name")) {
+            return MCPBuilder::Error(MCPBuilder::InvalidParams, request.value("id", json(nullptr)), "Invalid request: missing params.name");
+        }
+
         char* res_ptr = nullptr;
 
         for (const auto& plugin : loader->GetPlugins()) {
@@ -280,8 +296,8 @@ int main(int argc, char **argv) {
                             // --- 释放已分配内存 ---
                             delete[] res_ptr;
                         }
+                        return response;
                     }
-                    return response;
                 }
             }
         }
@@ -312,6 +328,11 @@ int main(int argc, char **argv) {
     
     server->OverrideCallback("resources/read", [&loader](const json& request) {
         nlohmann::ordered_json response = MCPBuilder::Response(request);
+
+        // 检查 params 是否存在
+        if (!request.contains("params") || !request["params"].contains("uri")) {
+            return MCPBuilder::Error(MCPBuilder::InvalidParams, request.value("id", json(nullptr)), "Invalid request: missing params.uri");
+        }
 
         char* res_ptr = nullptr;
 

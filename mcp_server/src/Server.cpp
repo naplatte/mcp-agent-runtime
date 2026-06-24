@@ -271,9 +271,16 @@ namespace vx::mcp {
             LOG(DEBUG) << "=== Request END ===" << std::endl;
         }
 
+        // 安全获取 id（JSON-RPC notification 不含 "id" 字段）
+        const bool has_id = request.contains("id");
+        const json request_id = has_id ? request["id"] : json(nullptr);
+
         // 检查request中是否有method字段
         if (!request.contains("method")) {
-            return MCPBuilder::Error(MCPBuilder::InvalidRequest, request["id"], "Missing method");
+            if (has_id) {
+                return MCPBuilder::Error(MCPBuilder::InvalidRequest, request_id, "Missing method");
+            }
+            return nullptr; // 无 method 也无 id 的通知，静默忽略
         }
 
         // 在 functionMap 里找 handler
@@ -292,8 +299,11 @@ namespace vx::mcp {
         }
 
         // 处理找不到 method 的情况
-        int id = request["id"];
-        return MCPBuilder::Error(MCPBuilder::MethodNotFound, std::to_string(id), "Method not found");
+        if (has_id) {
+            return MCPBuilder::Error(MCPBuilder::MethodNotFound, request_id, "Method not found");
+        }
+        // 未注册的通知（notification），按 JSON-RPC 规范静默忽略
+        return nullptr;
     }
 
     bool Server::OverrideCallback(const std::string &method, std::function<json(const json &)> function) {
@@ -379,8 +389,10 @@ namespace vx::mcp {
     // 构造 initialize 响应json，声明服务端提供的能力
         nlohmann::ordered_json response = {};
         response["jsonrpc"] = "2.0";
-        response["id"] = request["id"];
-        response["result"]["protocolVersion"] = request["params"]["protocolVersion"];
+        response["id"] = request.value("id", json(nullptr));
+        response["result"]["protocolVersion"] = request.contains("params")
+            ? request["params"].value("protocolVersion", "2024-11-05")
+            : "2024-11-05";
         /// TODO: "listChanged" 参数会导致 Claude Desktop 崩溃
         /// 是否需要根据协议版本号做判断？
         response["result"]["capabilities"]["tools"] = json::object();
@@ -395,7 +407,7 @@ namespace vx::mcp {
     json Server::PingCmd(const json &request) {
         nlohmann::ordered_json response = {};
         response["jsonrpc"] = "2.0";
-        response["id"] = request["id"];
+        response["id"] = request.value("id", json(nullptr));
         response["result"] = json::object();
         return response;
     }
@@ -403,7 +415,7 @@ namespace vx::mcp {
     json Server::ResourcesListCmd(const json &request) {
         nlohmann::ordered_json response;
         response["jsonrpc"] = "2.0";
-        response["id"] = request["id"];
+        response["id"] = request.value("id", json(nullptr));
         response["result"]["resources"] = json::array();
         return response;
     }
@@ -415,7 +427,7 @@ namespace vx::mcp {
     json Server::ToolsListCmd(const json &request) {
         nlohmann::ordered_json response;
         response["jsonrpc"] = "2.0";
-        response["id"] = request["id"];
+        response["id"] = request.value("id", json(nullptr));
         response["result"]["tools"] = json::array();
         return response;
     }
@@ -429,7 +441,7 @@ namespace vx::mcp {
         defaultTextContent["text"] = "you should override this method in your plugin.";
 
         response["jsonrpc"] = "2.0";
-        response["id"] = request["id"];
+        response["id"] = request.value("id", json(nullptr));
         response["result"]["content"] = json::array();
         response["result"]["content"].push_back(defaultTextContent);
         response["result"]["isError"] = true;
@@ -439,36 +451,36 @@ namespace vx::mcp {
 
     json Server::ResourcesSubscribeCmd(const json &request) {
         LOG(WARNING) << "ResourcesSubscribeCmd called but NOT YET IMPLEMENTED" << std::endl;
-        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request["id"], "Method not found");
+        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request.value("id", json(nullptr)), "Method not found");
     }
 
     json Server::ResourcesUnsubscribeCmd(const json &request) {
         LOG(WARNING) << "ResourcesUnsubscribeCmd called but NOT YET IMPLEMENTED" << std::endl;
-        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request["id"], "Method not found");
+        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request.value("id", json(nullptr)), "Method not found");
     }
 
     json Server::PromptsListCmd(const json &request) {
         nlohmann::ordered_json response;
         response["jsonrpc"] = "2.0";
-        response["id"] = request["id"];
+        response["id"] = request.value("id", json(nullptr));
         response["result"]["prompts"] = json::array();
         return response;
     }
 
     json Server::PromptsGetCmd(const json &request) {
-        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request["id"], "Method not found");
+        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request.value("id", json(nullptr)), "Method not found");
     }
 
     json Server::LoggingSetLevelCmd(const json &request) {
-        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request["id"], "Method not found");
+        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request.value("id", json(nullptr)), "Method not found");
     }
 
     json Server::CompletionCompleteCmd(const json &request) {
-        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request["id"], "Method not found");
+        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request.value("id", json(nullptr)), "Method not found");
     }
 
     json Server::RootsListCmd(const json &request) {
-        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request["id"], "Method not found");
+        return MCPBuilder::Error(MCPBuilder::MethodNotFound, request.value("id", json(nullptr)), "Method not found");
     }
 
     json Server::NotificationInitializedCmd(const json &request) {

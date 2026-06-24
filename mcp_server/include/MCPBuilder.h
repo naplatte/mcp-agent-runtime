@@ -42,15 +42,15 @@ public:
         InternalError = -32603
     };
 
-    static json Response(json request) {
+    static json Response(const json& request) {
         json response;
         response["jsonrpc"] = "2.0";
-        response["id"] = request["id"];
+        response["id"] = request.value("id", json(nullptr));
         response["result"] = json::object();
         return response;
     }
 
-    static json Error(ErrorCode code, const std::string& id, const std::string &message) {
+    static json Error(ErrorCode code, const json& id, const std::string &message) {
         return {
                 {"jsonrpc", "2.0"},
                 {"error", {{"code", code}, {"message", message}}},
