@@ -24,7 +24,7 @@ set(SOURCES
     src/main.cpp
     src/Server.cpp
     src/StdioTransport.cpp
-    src/SseTransport.cpp
+    src/StreamableHttpTransport.cpp
     src/PluginsLoader.cpp
 )
 

@@ -18,7 +18,7 @@ namespace mcp {
 // MCP 传输类型
 enum class MCPTransportType {
     STDIO,      // 标准输入输出（本地进程）
-    SSE         // Server-Sent Events（HTTP 远程）
+    STREAMABLE_HTTP // Streamable HTTP（HTTP 远程）
 };
 
 // MCP工具数据结构定义
@@ -32,7 +32,7 @@ struct MCPTool {
 struct MCPPrompt {
     std::string name;
     std::string description;
-    std::string arguemnts;  // JSON 参数
+    std::string arguments;  // JSON 参数
 };
 
 // MCP资源数据结构定义
@@ -65,8 +65,8 @@ struct MCPConnectionConfig {
     std::string server_path;                    // MCP Server 可执行文件路径
     std::vector<std::string> server_args;       // 启动参数
     
-    // SSE 模式配置
-    std::string sse_url;                        // SSE 服务器 URL (如 http://localhost:8080/mcp)
+    // Streamable HTTP 模式配置
+    std::string mcp_url;                        // MCP HTTP endpoint (如 http://localhost:8080/mcp)
     std::string api_key;                        // API Key（可选）
     int connect_timeout_ms = 5000;              // 连接超时
     int request_timeout_ms = 30000;             // 请求超时
@@ -101,7 +101,7 @@ public:
     virtual void setNotificationCallback(std::function<void(const std::string&, const std::string&)> callback) = 0;
 };
 
-// MCP客户端实现（支持 STDIO 和 SSE 两种传输方式） 真正负责与server通信的类
+// MCP客户端实现（支持 STDIO 和 Streamable HTTP 两种传输方式） 真正负责与server通信的类
 // 它实现了IMCPClient，public 部分基本就是刚才接口里的能力
 class MCPClient : public IMCPClient {
 public:
@@ -141,13 +141,15 @@ private:
     bool sendRequestStdio(const MCPRequest& request);
     void processNotificationsStdio();
     
-    // SSE 模式
-    bool connectSSE();
-    void disconnectSSE();
-    bool sendRequestSSE(const MCPRequest& request);
-    void processNotificationsSSE();
-    static size_t sseWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata);
-    static size_t sseHeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata);
+    // Streamable HTTP 模式
+    bool connectStreamableHttp();
+    void disconnectStreamableHttp();
+    bool sendRequestStreamableHttp(const MCPRequest& request);
+    void processStreamableHttpEvents();
+    void handleStreamableHttpEvent(const std::string& event_data);
+    std::string getMcpEndpoint() const;
+    static size_t streamableHttpEventCallback(char* ptr, size_t size, size_t nmemb, void* userdata);
+    static size_t streamableHttpHeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata);
     
     // 消息处理
     std::string buildJSONRPCRequest(const MCPRequest& request);
@@ -168,11 +170,11 @@ private:
     int stdin_pipe_{-1};
     int stdout_pipe_{-1};
     
-    // SSE 模式相关
+    // Streamable HTTP 模式相关
     void* curl_handle_{nullptr};        // CURL 句柄
-    std::string sse_session_id_;        // SSE 会话 ID
-    std::string sse_response_buffer_;   // SSE 响应缓冲
-    std::thread sse_event_thread_;      // SSE 事件监听线程
+    std::string session_id_;            // MCP HTTP 会话 ID
+    std::string stream_response_buffer_;// HTTP stream 响应缓冲
+    std::thread stream_event_thread_;   // Streamable HTTP 事件监听线程
     
     // 消息队列
     std::queue<MCPResponse> response_queue_;
@@ -267,7 +269,7 @@ private:
 //         ├── MCPClient
 //         │       │
 //         │       ├── STDIO
-//         │       └── SSE
+//         │       └── Streamable HTTP
 //         │
 //         └── MCPToolManager
 //                 │

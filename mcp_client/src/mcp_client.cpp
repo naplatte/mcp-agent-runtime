@@ -9,6 +9,8 @@
 #include <json/json.h>
 #include <ctime>
 #include <curl/curl.h>
+#include <algorithm>
+#include <cctype>
 
 namespace agent_rpc {
 namespace mcp {
@@ -61,16 +63,20 @@ bool MCPClient::connect(const MCPConnectionConfig& config) {
         
         LOG_INFO("MCP client connected to server (STDIO): " + server_path_);
         success = true;
-    } else if (transport_type_ == MCPTransportType::SSE) {
-        if (!connectSSE()) {
-            LOG_ERROR("Failed to connect to MCP server via SSE");
+    } else if (transport_type_ == MCPTransportType::STREAMABLE_HTTP) {
+        if (!connectStreamableHttp()) {
+            LOG_ERROR("Failed to connect to MCP server via Streamable HTTP");
             return false;
         }
         
         connected_ = true;
         running_ = true;
         
-        LOG_INFO("MCP client connected to server (SSE): " + config.sse_url);
+        stream_event_thread_ = std::thread([this]() {
+            processStreamableHttpEvents();
+        });
+
+        LOG_INFO("MCP client connected to server (Streamable HTTP): " + config.mcp_url);
         success = true;
     }
     
@@ -96,8 +102,8 @@ void MCPClient::disconnect() {
     
     if (transport_type_ == MCPTransportType::STDIO) {
         stopMCPServer();
-    } else if (transport_type_ == MCPTransportType::SSE) {
-        disconnectSSE();
+    } else if (transport_type_ == MCPTransportType::STREAMABLE_HTTP) {
+        disconnectStreamableHttp();
     }
     
     LOG_INFO("MCP client disconnected");
@@ -384,8 +390,8 @@ void MCPClient::setNotificationCallback(std::function<void(const std::string&, c
 bool MCPClient::sendRequest(const MCPRequest& request) {
     if (transport_type_ == MCPTransportType::STDIO) {
         return sendRequestStdio(request);
-    } else if (transport_type_ == MCPTransportType::SSE) {
-        return sendRequestSSE(request);
+    } else if (transport_type_ == MCPTransportType::STREAMABLE_HTTP) {
+        return sendRequestStreamableHttp(request);
     }
     return false;
 }
@@ -614,323 +620,255 @@ MCPResponse MCPClient::parseJSONRPCResponse(const std::string& response) {
 }
 
 // ============================================================================
-// SSE (Server-Sent Events) 传输实现
+// Streamable HTTP 传输实现
 // ============================================================================
 
-bool MCPClient::connectSSE() {
-    // 初始化 CURL
+bool MCPClient::connectStreamableHttp() {
     curl_global_init(CURL_GLOBAL_ALL);
     curl_handle_ = curl_easy_init();
-    
     if (!curl_handle_) {
-        LOG_ERROR("Failed to initialize CURL for SSE");
+        LOG_ERROR("Failed to initialize CURL for Streamable HTTP");
         return false;
     }
-    
-    // 发送初始化请求获取 session ID
-    CURL* curl = static_cast<CURL*>(curl_handle_);
-    
-    // 构建初始化 URL
-    std::string init_url = config_.sse_url;
-    if (init_url.back() != '/') {
-        init_url += "/";
-    }
-    init_url += "sse";
-    
-    curl_easy_setopt(curl, CURLOPT_URL, init_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sseWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, sseHeaderCallback);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.connect_timeout_ms / 1000);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, config_.connect_timeout_ms / 1000);
-    
-    // 设置 API Key（如果有）
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Accept: text/event-stream");
-    headers = curl_slist_append(headers, "Cache-Control: no-cache");
-    if (!config_.api_key.empty()) {
-        std::string auth_header = "Authorization: Bearer " + config_.api_key;
-        headers = curl_slist_append(headers, auth_header.c_str());
-    }
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    
-    // SSL 验证
-    if (!config_.verify_ssl) {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    }
-    
-    // 执行请求获取 session
-    sse_response_buffer_.clear();
-    CURLcode res = curl_easy_perform(curl);
-    
-    curl_slist_free_all(headers);
-    
-    if (res != CURLE_OK) {
-        LOG_ERROR("SSE connection failed: " + std::string(curl_easy_strerror(res)));
-        curl_easy_cleanup(curl);
-        curl_handle_ = nullptr;
-        return false;
-    }
-    
-    // 解析 session ID
-    if (sse_session_id_.empty()) {
-        // 尝试从响应中解析
-        try {
-            Json::Value root;
-            Json::Reader reader;
-            if (reader.parse(sse_response_buffer_, root)) {
-                if (root.isMember("sessionId")) {
-                    sse_session_id_ = root["sessionId"].asString();
-                }
-            }
-        } catch (...) {
-            // 忽略解析错误
-        }
-    }
-    
-    // 启动 SSE 事件监听线程
-    sse_event_thread_ = std::thread([this]() {
-        processNotificationsSSE();
-    });
-    
-    LOG_INFO("SSE connection established, session: " + sse_session_id_);
     return true;
 }
 
-void MCPClient::disconnectSSE() {
+void MCPClient::disconnectStreamableHttp() {
     running_ = false;
-    
-    if (sse_event_thread_.joinable()) {
-        sse_event_thread_.join();
+
+    if (stream_event_thread_.joinable()) {
+        stream_event_thread_.join();
     }
-    
+
     if (curl_handle_) {
         curl_easy_cleanup(static_cast<CURL*>(curl_handle_));
         curl_handle_ = nullptr;
     }
-    
+
     curl_global_cleanup();
-    sse_session_id_.clear();
-    
-    LOG_INFO("SSE connection closed");
+    session_id_.clear();
+    stream_response_buffer_.clear();
+
+    LOG_INFO("Streamable HTTP connection closed");
 }
 
-bool MCPClient::sendRequestSSE(const MCPRequest& request) {
+bool MCPClient::sendRequestStreamableHttp(const MCPRequest& request) {
     if (!curl_handle_) {
-        LOG_ERROR("SSE not connected");
+        LOG_ERROR("Streamable HTTP not connected");
         return false;
     }
-    
-    // 创建新的 CURL handle 用于 POST 请求
+
     CURL* curl = curl_easy_init();
     if (!curl) {
-        LOG_ERROR("Failed to create CURL handle for SSE request");
+        LOG_ERROR("Failed to create CURL handle for Streamable HTTP request");
         return false;
     }
-    
-    // 构建请求 URL
-    std::string post_url = config_.sse_url;
-    if (post_url.back() != '/') {
-        post_url += "/";
-    }
-    post_url += "message";
-    
-    // 如果有 session ID，添加到 URL
-    if (!sse_session_id_.empty()) {
-        post_url += "?sessionId=" + sse_session_id_;
-    }
-    
-    // 构建 JSON-RPC 请求
+
+    std::string endpoint = getMcpEndpoint();
+    std::string response_data;
     std::string json_request = buildJSONRPCRequest(request);
-    
-    curl_easy_setopt(curl, CURLOPT_URL, post_url.c_str());
+
+    curl_easy_setopt(curl, CURLOPT_URL, endpoint.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_request.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, json_request.length());
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.request_timeout_ms / 1000);
-    
-    // 设置响应回调
-    std::string response_data;
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, 
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(config_.request_timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(config_.connect_timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, streamableHttpHeaderCallback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
         +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
             std::string* data = static_cast<std::string*>(userdata);
             data->append(ptr, size * nmemb);
             return size * nmemb;
         });
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
-    
-    // 设置请求头
+
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: application/json, text/event-stream");
+    headers = curl_slist_append(headers, "MCP-Protocol-Version: 2025-11-25");
+    if (!session_id_.empty()) {
+        std::string session_header = "MCP-Session-Id: " + session_id_;
+        headers = curl_slist_append(headers, session_header.c_str());
+    }
     if (!config_.api_key.empty()) {
         std::string auth_header = "Authorization: Bearer " + config_.api_key;
         headers = curl_slist_append(headers, auth_header.c_str());
     }
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    
-    // SSL 验证
+
     if (!config_.verify_ssl) {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
-    
-    // 执行请求
+
     CURLcode res = curl_easy_perform(curl);
-    
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
-    
+
     if (res != CURLE_OK) {
-        LOG_ERROR("SSE request failed: " + std::string(curl_easy_strerror(res)));
+        LOG_ERROR("Streamable HTTP request failed: " + std::string(curl_easy_strerror(res)));
         return false;
     }
-    
-    // 解析响应并放入队列
+    if (http_code >= 400) {
+        LOG_ERROR("Streamable HTTP request returned HTTP " + std::to_string(http_code) + ": " + response_data);
+        return false;
+    }
+
     if (!response_data.empty()) {
         MCPResponse response = parseJSONRPCResponse(response_data);
         std::lock_guard<std::mutex> lock(queue_mutex_);
         response_queue_.push(response);
         queue_cv_.notify_one();
     }
-    
+
     return true;
 }
 
-void MCPClient::processNotificationsSSE() {
-    if (!curl_handle_) {
-        return;
-    }
-    
-    // 创建 SSE 监听连接
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        LOG_ERROR("Failed to create CURL handle for SSE events");
-        return;
-    }
-    
-    // 构建 SSE 事件 URL
-    std::string sse_url = config_.sse_url;
-    if (sse_url.back() != '/') {
-        sse_url += "/";
-    }
-    sse_url += "sse";
-    if (!sse_session_id_.empty()) {
-        sse_url += "?sessionId=" + sse_session_id_;
-    }
-    
-    curl_easy_setopt(curl, CURLOPT_URL, sse_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sseWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);  // 无超时，持续监听
-    
-    // 设置请求头
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Accept: text/event-stream");
-    headers = curl_slist_append(headers, "Cache-Control: no-cache");
-    if (!config_.api_key.empty()) {
-        std::string auth_header = "Authorization: Bearer " + config_.api_key;
-        headers = curl_slist_append(headers, auth_header.c_str());
-    }
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    
-    // SSL 验证
-    if (!config_.verify_ssl) {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    }
-    
-    // 执行 SSE 监听（阻塞直到连接关闭或 running_ 变为 false）
+void MCPClient::processStreamableHttpEvents() {
     while (running_) {
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            LOG_ERROR("Failed to create CURL handle for Streamable HTTP events");
+            return;
+        }
+
+        std::string endpoint = getMcpEndpoint();
+        curl_easy_setopt(curl, CURLOPT_URL, endpoint.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, streamableHttpEventCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, streamableHttpHeaderCallback);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 2000L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(config_.connect_timeout_ms));
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Accept: text/event-stream");
+        headers = curl_slist_append(headers, "Cache-Control: no-cache");
+        headers = curl_slist_append(headers, "MCP-Protocol-Version: 2025-11-25");
+        if (!session_id_.empty()) {
+            std::string session_header = "MCP-Session-Id: " + session_id_;
+            headers = curl_slist_append(headers, session_header.c_str());
+        }
+        if (!config_.api_key.empty()) {
+            std::string auth_header = "Authorization: Bearer " + config_.api_key;
+            headers = curl_slist_append(headers, auth_header.c_str());
+        }
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        if (!config_.verify_ssl) {
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        }
+
         CURLcode res = curl_easy_perform(curl);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
         if (res != CURLE_OK && running_) {
-            LOG_WARN("SSE connection interrupted: " + std::string(curl_easy_strerror(res)));
-            // 短暂等待后重连
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            LOG_WARN("Streamable HTTP event stream interrupted: " + std::string(curl_easy_strerror(res)));
+        }
+        if (running_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }
-    
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 }
 
-size_t MCPClient::sseWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+void MCPClient::handleStreamableHttpEvent(const std::string& event_data) {
+    MCPResponse response = parseJSONRPCResponse(event_data);
+    if (response.id.empty()) {
+        if (notification_callback_) {
+            Json::Value root;
+            Json::Reader reader;
+            if (reader.parse(event_data, root) && root["method"].asString() == "notifications/message") {
+                const Json::Value& params = root["params"];
+                notification_callback_(params["pluginName"].asString(), params["notification"].asString());
+            }
+        }
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    response_queue_.push(response);
+    queue_cv_.notify_one();
+}
+
+std::string MCPClient::getMcpEndpoint() const {
+    std::string endpoint = config_.mcp_url;
+    if (endpoint.size() >= 4 && endpoint.substr(endpoint.size() - 4) == "/mcp") {
+        return endpoint;
+    }
+    if (!endpoint.empty() && endpoint.back() != '/') {
+        endpoint += "/";
+    }
+    endpoint += "mcp";
+    return endpoint;
+}
+
+size_t MCPClient::streamableHttpEventCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     MCPClient* client = static_cast<MCPClient*>(userdata);
     size_t total_size = size * nmemb;
-    
-    std::string data(ptr, total_size);
-    client->sse_response_buffer_ += data;
-    
-    // 解析 SSE 事件
+    client->stream_response_buffer_.append(ptr, total_size);
+
     size_t pos = 0;
-    while ((pos = client->sse_response_buffer_.find("\n\n")) != std::string::npos) {
-        std::string event = client->sse_response_buffer_.substr(0, pos);
-        client->sse_response_buffer_.erase(0, pos + 2);
-        
-        // 解析事件数据
+    while ((pos = client->stream_response_buffer_.find("\n\n")) != std::string::npos) {
+        std::string event = client->stream_response_buffer_.substr(0, pos);
+        client->stream_response_buffer_.erase(0, pos + 2);
+
         std::string event_data;
         std::istringstream iss(event);
         std::string line;
         while (std::getline(iss, line)) {
-            if (line.substr(0, 5) == "data:") {
-                event_data = line.substr(5);
-                // 去除前导空格
-                size_t start = event_data.find_first_not_of(" ");
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            if (line.rfind("data:", 0) == 0) {
+                std::string value = line.substr(5);
+                size_t start = value.find_first_not_of(" ");
                 if (start != std::string::npos) {
-                    event_data = event_data.substr(start);
-                }
-            } else if (line.substr(0, 3) == "id:") {
-                // 更新 session ID
-                client->sse_session_id_ = line.substr(3);
-                size_t start = client->sse_session_id_.find_first_not_of(" ");
-                if (start != std::string::npos) {
-                    client->sse_session_id_ = client->sse_session_id_.substr(start);
+                    event_data += value.substr(start);
                 }
             }
         }
-        
+
         if (!event_data.empty()) {
-            // 解析 JSON-RPC 响应或通知
-            MCPResponse response = client->parseJSONRPCResponse(event_data);
-            
-            if (response.id.empty()) {
-                // 这是一个通知
-                if (client->notification_callback_) {
-                    try {
-                        Json::Value root;
-                        Json::Reader reader;
-                        if (reader.parse(event_data, root)) {
-                            std::string method = root["method"].asString();
-                            if (method == "notifications/message") {
-                                const Json::Value& params = root["params"];
-                                std::string plugin_name = params["pluginName"].asString();
-                                std::string notification = params["notification"].asString();
-                                client->notification_callback_(plugin_name, notification);
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        LOG_WARN("Failed to parse SSE notification: " + std::string(e.what()));
-                    }
-                }
-            } else {
-                // 这是一个响应
-                std::lock_guard<std::mutex> lock(client->queue_mutex_);
-                client->response_queue_.push(response);
-                client->queue_cv_.notify_one();
-            }
+            client->handleStreamableHttpEvent(event_data);
         }
     }
-    
+
     return total_size;
 }
 
-size_t MCPClient::sseHeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata) {
-    // 可以在这里解析响应头
-    return size * nitems;
+size_t MCPClient::streamableHttpHeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata) {
+    MCPClient* client = static_cast<MCPClient*>(userdata);
+    size_t total_size = size * nitems;
+    std::string header(buffer, total_size);
+    auto colon = header.find(':');
+    if (colon == std::string::npos) {
+        return total_size;
+    }
+
+    std::string name = header.substr(0, colon);
+    std::string value = header.substr(colon + 1);
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }).base(), value.end());
+
+    if (name == "mcp-session-id") {
+        client->session_id_ = value;
+    }
+    return total_size;
 }
 
 } // namespace mcp
 } // namespace agent_rpc
-
-

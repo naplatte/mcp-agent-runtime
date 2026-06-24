@@ -40,7 +40,7 @@ mcp-agent-runtime/
 │       └── logger.cpp          # 日志实现
 ├── mcp_client/                 # MCP 客户端库
 │   ├── include/agent_rpc/mcp/
-│   │   ├── mcp_client.h        # MCP 客户端接口（STDIO + SSE）
+│   │   ├── mcp_client.h        # MCP 客户端接口（STDIO + Streamable HTTP）
 │   │   ├── mcp_agent_integration.h  # AI Agent 集成辅助类
 │   │   └── rag/                # RAG-MCP 模块
 │   │       ├── embedding_service.h  # DashScope 向量化服务
@@ -59,7 +59,7 @@ mcp-agent-runtime/
 │   │   ├── PluginAPI.h         # 插件 C ABI 定义
 │   │   ├── Server.h            # 核心 JSON-RPC 服务器
 │   │   ├── StdioTransport.h    # STDIO 传输实现
-│   │   ├── SseTransport.h      # SSE 传输实现
+│   │   ├── StreamableHttpTransport.h # Streamable HTTP 传输实现
 │   │   ├── PluginsLoader.h     # 动态插件加载器
 │   │   ├── MCPBuilder.h        # JSON-RPC 响应构建器
 │   │   └── SessionBuilder.h    # 会话 ID 生成器
@@ -67,7 +67,7 @@ mcp-agent-runtime/
 │   │   ├── main.cpp            # 服务器入口
 │   │   ├── Server.cpp          # 核心服务器实现
 │   │   ├── StdioTransport.cpp  # STDIO 传输实现
-│   │   ├── SseTransport.cpp    # SSE 传输实现
+│   │   ├── StreamableHttpTransport.cpp # Streamable HTTP 传输实现
 │   │   └── PluginsLoader.cpp   # 插件加载器实现
 │   └── plugins/                # 内置插件
 │       ├── calculator/         # 计算器
@@ -89,7 +89,7 @@ mcp-agent-runtime/
 │   ├── python/                 # Python 测试客户端
 │   │   ├── test_ai_mcp.py      # AI 集成测试
 │   │   ├── test-client-stdio.py
-│   │   ├── test-client-sse.py
+│   │   ├── test-client-streamable-http.py
 │   │   └── test-client-http.py
 │   └── config/                 # 测试配置
 │       ├── configuration-*.json
@@ -108,7 +108,7 @@ mcp-agent-runtime/
 支持两种传输模式的 MCP 客户端：
 
 - **STDIO 模式**: 通过标准输入输出与本地 MCP Server 进程通信
-- **SSE 模式**: 通过 HTTP Server-Sent Events 与远程 MCP Server 通信
+- **Streamable HTTP 模式**: 通过统一 `/mcp` HTTP endpoint 与远程 MCP Server 通信
 
 主要类：
 - `MCPClient` - MCP 客户端（JSON-RPC 协议）
@@ -131,7 +131,7 @@ mcp-agent-runtime/
 完整的 MCP 服务器实现（MIT License, by Giuseppe Mastrangelo）：
 
 - 插件化架构，支持动态加载 `.so` 插件
-- 两种传输模式：STDIO / SSE
+- 两种传输模式：STDIO / Streamable HTTP
 - 内置 6 个示例插件
 - 跨平台支持（Linux / macOS / Windows）
 
@@ -141,7 +141,7 @@ mcp-agent-runtime/
 |------|------|------|
 | C++20 编译器 | 编译 | 全部 |
 | CMake >= 3.20 | 构建 | 全部 |
-| libcurl | HTTP/SSE 客户端 | mcp_client |
+| libcurl | HTTP 客户端 | mcp_client |
 | jsoncpp | JSON 解析 | mcp_client |
 | nlohmann/json | JSON（header-only, 已内置） | mcp_server, mcp_client(RAG) |
 | Threads | 多线程 | 全部 |
@@ -181,8 +181,8 @@ cmake -DCMAKE_BUILD_TYPE=Debug ..
 # STDIO 模式（默认）
 ./build/mcp_server/mcp_server -p ./build/mcp_server/plugins
 
-# SSE 模式
-./build/mcp_server/mcp_server -s -p ./build/mcp_server/plugins
+# Streamable HTTP 模式
+./build/mcp_server/mcp_server --streamable-http -p ./build/mcp_server/plugins
 ```
 
 ### 使用 MCP 客户端

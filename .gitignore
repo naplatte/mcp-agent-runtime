@@ -15,3 +15,7 @@ docs/doxygen_output/
 *.exe
 
 *.log
+
+.idea/
+.learnings/
+.serena/

@@ -26,7 +26,7 @@
 #include "httplib.h"
 #include "popl.hpp"
 #include "StdioTransport.h"
-#include "SseTransport.h"
+#include "StreamableHttpTransport.h"
 #include "Server.h"
 #include "aixlog.hpp"
 #include "PluginsLoader.h"
@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
     auto plugins_directory_option = op.add<Value<std::string>>("p", "plugins", "the directory where to load the plugins", "./plugins");
     auto logs_directory_option = op.add<Value<std::string>>("l", "logs", "the directory where to store the logs", "./logs");
     auto verbose_option = op.add<Value<bool>>("v", "verbose", "enable verbose", verbose);
-    auto use_sse_server = op.add<Switch>("s", "sse", "start as sse server");
+    auto use_streamable_http_server = op.add<Switch>("", "streamable-http", "start as Streamable HTTP server");
     name_option->assign_to(&name);
     plugins_directory_option->assign_to(&plugins_directory);
     logs_directory_option->assign_to(&logs_directory);
@@ -114,8 +114,8 @@ int main(int argc, char **argv) {
     //============================================================================================
     // 选择传输方式
     //============================================================================================
-    if (use_sse_server->is_set()) {
-        transport = std::make_shared<vx::transport::SSE>();
+    if (use_streamable_http_server->is_set()) {
+        transport = std::make_shared<vx::transport::StreamableHttp>();
     } else {
         transport = std::make_shared<vx::transport::Stdio>();
     }

@@ -115,7 +115,7 @@ namespace vx::mcp {
         writer_running_ = true;
         writer_thread_ = std::thread(&Server::WriterLoop, this);
 
-        // 启动传输层；SSE 需要真正启动服务，stdio 通常直接返回 true
+        // 启动传输层；HTTP 传输需要真正启动服务，stdio 通常直接返回 true
         if (!transport_->Start()) {
             LOG(ERROR) << "Failed to start transport: " << transport_->GetName() << std::endl;
             return false;
@@ -223,7 +223,7 @@ namespace vx::mcp {
 
         isStopping_ = true;
 
-        // 停止传输层；SSE 会关闭服务，stdio 可以是空操作
+        // 停止传输层；HTTP 传输会关闭服务，stdio 可以是空操作
         if (transport_) {
             LOG(INFO) << "Stopping transport..." << std::endl;
             transport_->Stop();
