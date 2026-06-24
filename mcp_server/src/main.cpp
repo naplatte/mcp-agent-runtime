@@ -275,7 +275,10 @@ int main(int argc, char **argv) {
 
         // 检查 params 是否存在
         if (!request.contains("params") || !request["params"].contains("name")) {
-            return MCPBuilder::Error(MCPBuilder::InvalidParams, request.value("id", json(nullptr)), "Invalid request: missing params.name");
+            response["error"]["code"] = MCPBuilder::InvalidParams;
+            response["error"]["message"] = "Invalid request: missing params.name";
+            response["result"] = nullptr;
+            return response;
         }
 
         char* res_ptr = nullptr;
@@ -331,7 +334,10 @@ int main(int argc, char **argv) {
 
         // 检查 params 是否存在
         if (!request.contains("params") || !request["params"].contains("uri")) {
-            return MCPBuilder::Error(MCPBuilder::InvalidParams, request.value("id", json(nullptr)), "Invalid request: missing params.uri");
+            response["error"]["code"] = MCPBuilder::InvalidParams;
+            response["error"]["message"] = "Invalid request: missing params.uri";
+            response["result"] = nullptr;
+            return response;
         }
 
         char* res_ptr = nullptr;
