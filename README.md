@@ -149,9 +149,8 @@ mcp-agent-runtime/
 ## 构建
 
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+mkdir build && cd build && cmake ..
+make -j1
 ```
 
 ### 仅构建 MCP 服务器
