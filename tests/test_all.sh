@@ -20,7 +20,7 @@ echo "  1) AI 集成测试     - 使用百炼 AI 模型 + MCP 工具调用 (需�
 echo "  2) 基础功能测试     - 仅测试 MCP Server 协议和工具 (无需 API Key)"
 echo "  3) C++ 自动化测试   - 使用项目自身 mcp_client 自动测试 (无需 API Key)"
 echo "  4) C++ 交互模式    - 手动输入命令调用工具，实时看效果"
-echo "  5) C++ AI 模式     - 自然语言交互，AI 自动调用 MCP 工具 (需要 API Key)"
+echo "  5) C++ AI 模式     - 自然语言交互，AI 自动调用 MCP 工具，可选 STDIO / Streamable HTTP (需要 API Key)"
 echo ""
 read -rp "选择测试模式 [默认 1]: " MODE
 MODE=${MODE:-1}
@@ -169,6 +169,45 @@ elif [ "$MODE" = "5" ]; then
         3) MODEL="qwen-max" ;;
         *) MODEL="$MODEL_CHOICE" ;;
     esac
+
+    echo ""
+    echo "MCP 传输模式: 1) STDIO  2) Streamable HTTP"
+    read -rp "选择 MCP 传输模式 [默认 1]: " TRANSPORT_CHOICE
+    TRANSPORT_CHOICE=${TRANSPORT_CHOICE:-1}
+
+    if [ "$TRANSPORT_CHOICE" = "2" ]; then
+        MCP_URL="${MCP_STREAMABLE_URL:-http://127.0.0.1:8080/mcp}"
+        HEALTH_URL="${MCP_URL%/mcp}/health"
+        LOGS="$PROJECT_ROOT/build/test_logs"
+        mkdir -p "$LOGS"
+
+        SERVER_PID=""
+        cleanup_streamable_http() {
+            if [ -n "$SERVER_PID" ]; then
+                kill "$SERVER_PID" 2>/dev/null || true
+                wait "$SERVER_PID" 2>/dev/null || true
+            fi
+        }
+        trap cleanup_streamable_http EXIT INT TERM
+
+        if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+            "$SERVER" --streamable-http -p "$PLUGINS" -l "$LOGS" >/dev/null 2>&1 &
+            SERVER_PID=$!
+
+            for _ in {1..30}; do
+                curl -fsS "$HEALTH_URL" >/dev/null 2>&1 && break
+                sleep 0.2
+            done
+        fi
+
+        if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+            echo "错误: Streamable HTTP MCP Server 未启动成功: $HEALTH_URL"
+            exit 1
+        fi
+
+        "$TEST_BIN" "$SERVER" "$PLUGINS" --ai "$API_KEY" --model "$MODEL" --streamable-http "$MCP_URL"
+        exit $?
+    fi
 
     exec "$TEST_BIN" "$SERVER" "$PLUGINS" --ai "$API_KEY" --model "$MODEL" # 用当前进程直接运行 $TEST_BIN 这个程序，并把后面所有变量当作参数传给它
 

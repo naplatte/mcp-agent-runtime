@@ -3,7 +3,7 @@
  * @brief C++ 集成测试 — 使用项目自身的 mcp_client 测试 mcp_server + plugins
  *
  * 测试链路:
- *   mcp_client (MCPClient STDIO) → fork mcp_server → 加载 plugins → 返回结果
+ *   mcp_client → mcp_server → 加载 plugins → 返回结果
  *
  * 三种运行模式:
  *   1. 自动化测试 (默认)         — 自动跑 6 个测试用例
@@ -16,6 +16,7 @@
  *   ./build/tests/cpp/test_mcp_integration <server> <plugins> -i
  *   ./build/tests/cpp/test_mcp_integration <server> <plugins> --ai sk-xxx
  *   ./build/tests/cpp/test_mcp_integration <server> <plugins> --ai sk-xxx --model qwen-max
+ *   ./build/tests/cpp/test_mcp_integration <server> <plugins> --ai sk-xxx --streamable-http http://127.0.0.1:8080/mcp
  */
 
 #include "agent_rpc/mcp/mcp_client.h"
@@ -539,12 +540,14 @@ static void print_usage(const char* prog) {
               << "  --interactive, -i         交互模式: 手动输入命令调用工具\n"
               << "  --ai <api_key>            AI 模式: 自然语言交互, AI 自动调用工具\n"
               << "  --model <model>           指定 LLM 模型 (默认: qwen-plus)\n"
+              << "  --streamable-http [url]   使用 Streamable HTTP 连接已启动的 MCP Server\n"
               << "\n"
               << "Examples:\n"
               << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins\n"
               << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins -i\n"
               << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins --ai sk-xxx\n"
-              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins --ai sk-xxx --model qwen-max\n";
+              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins --ai sk-xxx --model qwen-max\n"
+              << "  " << prog << " ./build/mcp_server/mcp_server ./build/mcp_server/plugins --ai sk-xxx --streamable-http http://127.0.0.1:8080/mcp\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -558,6 +561,8 @@ int main(int argc, char* argv[]) {
     bool interactive = false;
     std::string ai_api_key;
     std::string ai_model = "qwen-plus";
+    bool use_streamable_http = false;
+    std::string mcp_url = "http://127.0.0.1:8080/mcp";
 
     for (int i = 3; i < argc; i++) {
         std::string arg = argv[i];
@@ -567,6 +572,11 @@ int main(int argc, char* argv[]) {
             ai_api_key = argv[++i];
         } else if (arg == "--model" && i + 1 < argc) {
             ai_model = argv[++i];
+        } else if (arg == "--streamable-http") {
+            use_streamable_http = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                mcp_url = argv[++i];
+            }
         }
     }
 
@@ -579,6 +589,9 @@ int main(int argc, char* argv[]) {
 
     print_info("Server:  " + server_path);
     print_info("Plugins: " + plugins_path);
+    if (use_streamable_http) {
+        print_info("MCP URL: " + mcp_url);
+    }
 
     // ---------- 连接 ----------
     print_header("连接 MCP Server");
@@ -586,12 +599,24 @@ int main(int argc, char* argv[]) {
     MCPClient client; // 客户端对象
     std::vector<std::string> server_args = {"-p", plugins_path};
 
-    if (!client.connect(server_path, server_args)) {
-        print_fail("无法连接到 MCP Server: " + server_path);
-        std::cout << "\n\033[0;31m测试中止。\033[0m\n";
-        return 1;
+    if (use_streamable_http) {
+        MCPConnectionConfig config;
+        config.transport = MCPTransportType::STREAMABLE_HTTP;
+        config.mcp_url = mcp_url;
+        if (!client.connect(config)) {
+            print_fail("无法通过 Streamable HTTP 连接到 MCP Server: " + mcp_url);
+            std::cout << "\n\033[0;31m测试中止。\033[0m\n";
+            return 1;
+        }
+        print_ok("已通过 Streamable HTTP 连接到 MCP Server");
+    } else {
+        if (!client.connect(server_path, server_args)) {
+            print_fail("无法连接到 MCP Server: " + server_path);
+            std::cout << "\n\033[0;31m测试中止。\033[0m\n";
+            return 1;
+        }
+        print_ok("已通过 STDIO 连接到 MCP Server");
     }
-    print_ok("已通过 STDIO 连接到 MCP Server");
 
     // ---------- 运行测试 ----------
     if (!ai_api_key.empty()) {
