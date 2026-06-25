@@ -71,10 +71,12 @@ bool MCPClient::connect(const MCPConnectionConfig& config) {
         
         connected_ = true;
         running_ = true;
-        
-        stream_event_thread_ = std::thread([this]() {
-            processStreamableHttpEvents();
-        });
+
+        if (notification_callback_) {
+            stream_event_thread_ = std::thread([this]() {
+                processStreamableHttpEvents();
+            });
+        }
 
         LOG_INFO("MCP client connected to server (Streamable HTTP): " + config.mcp_url);
         success = true;
@@ -385,6 +387,14 @@ MCPResponse MCPClient::readResource(const std::string& uri) {
 
 void MCPClient::setNotificationCallback(std::function<void(const std::string&, const std::string&)> callback) {
     notification_callback_ = callback;
+    if (transport_type_ == MCPTransportType::STREAMABLE_HTTP &&
+        connected_ &&
+        notification_callback_ &&
+        !stream_event_thread_.joinable()) {
+        stream_event_thread_ = std::thread([this]() {
+            processStreamableHttpEvents();
+        });
+    }
 }
 
 bool MCPClient::sendRequest(const MCPRequest& request) {
@@ -769,7 +779,7 @@ void MCPClient::processStreamableHttpEvents() {
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 
-        if (res != CURLE_OK && running_) {
+        if (res != CURLE_OK && res != CURLE_OPERATION_TIMEDOUT && running_) {
             LOG_WARN("Streamable HTTP event stream interrupted: " + std::string(curl_easy_strerror(res)));
         }
         if (running_) {
