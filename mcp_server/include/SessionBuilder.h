@@ -30,6 +30,8 @@
 #include <sstream>
 #include <iomanip>
 
+// 给Steamable HTTP 服务端生成一个本次传输的session id
+
 namespace vx::utils {
 
     struct SessionBuilder {
