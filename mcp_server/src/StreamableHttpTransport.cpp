@@ -156,6 +156,7 @@ void StreamableHttp::Stop() {
 }
 
 void StreamableHttp::SetupRoutes() {
+    // CORS 预检
     server_->Options("/.*", [this](const httplib::Request& req, httplib::Response& res) {
         HandleOptionsRequest(req, res);
     });
@@ -173,6 +174,7 @@ void StreamableHttp::SetupRoutes() {
         HandleMcpStream(req, res);
     });
 
+    // 关闭 event stream
     server_->Delete("/mcp", [this](const httplib::Request& req, httplib::Response& res) {
         HandleMcpDelete(req, res);
     });
