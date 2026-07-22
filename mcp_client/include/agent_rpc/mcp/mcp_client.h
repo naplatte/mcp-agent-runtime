@@ -227,7 +227,7 @@ private:
     std::atomic<bool> initialized_{false};
 };
 
-// MCP服务集成器
+// MCP服务集成器 先跳过不看！
 // 更高一层的简单集成器
 
 class MCPServiceIntegrator {

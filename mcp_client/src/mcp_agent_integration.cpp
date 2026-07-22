@@ -36,7 +36,7 @@ bool MCPAgentIntegration::initialize(const MCPAgentConfig& config) {
     
     config_ = config;
     
-    // 如果 MCP 未启用，直接返回成功
+    // 如果 MCP 未启用，直接返回成功（mcp不可用时，上层agent依然能正常工作）
     if (!config_.enable_mcp) {
         LOG_INFO("MCP is disabled, skipping initialization");
         initialized_ = true;
