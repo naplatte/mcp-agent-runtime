@@ -34,16 +34,19 @@ bool MCPClient::connect(const std::string& server_path, const std::vector<std::s
 }
 
 bool MCPClient::connect(const MCPConnectionConfig& config) {
+    // 1. 避免重复连接
     if (connected_) {
         LOG_WARN("MCP client already connected");
         return true;
     }
     
+    // 2. 保存连接配置和传输类型
     config_ = config;
     transport_type_ = config.transport;
     
     bool success = false;
     
+    // 3. STDIO 模式：启动本地 Server 子进程并建立双向管道
     if (transport_type_ == MCPTransportType::STDIO) {
         server_path_ = config.server_path;
         server_args_ = config.server_args;
@@ -53,10 +56,11 @@ bool MCPClient::connect(const MCPConnectionConfig& config) {
             return false;
         }
         
+        // 4. 标记 Client 已连接，并允许后台线程继续运行
         connected_ = true;
         running_ = true;
         
-        // 启动通知处理线程
+        // 5. 持续读取 Server stdout，处理响应和通知
         notification_thread_ = std::thread([this]() {
             processNotificationsStdio();
         });
@@ -64,14 +68,17 @@ bool MCPClient::connect(const MCPConnectionConfig& config) {
         LOG_INFO("MCP client connected to server (STDIO): " + server_path_);
         success = true;
     } else if (transport_type_ == MCPTransportType::STREAMABLE_HTTP) {
+        // 3. Streamable HTTP 模式：初始化 HTTP 客户端
         if (!connectStreamableHttp()) {
             LOG_ERROR("Failed to connect to MCP server via Streamable HTTP");
             return false;
         }
         
+        // 4. 标记 Client 已连接，并允许后台线程继续运行
         connected_ = true;
         running_ = true;
 
+        // 5. 已设置通知回调时，启动 Server 事件监听线程
         if (notification_callback_) {
             stream_event_thread_ = std::thread([this]() {
                 processStreamableHttpEvents();
@@ -82,6 +89,7 @@ bool MCPClient::connect(const MCPConnectionConfig& config) {
         success = true;
     }
     
+    // 6. 未识别的传输类型会保持 false
     return success;
 }
 
