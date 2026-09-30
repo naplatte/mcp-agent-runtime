@@ -22,6 +22,21 @@ git commit -m "你的提交信息"
 # 3. 推送到 GitHub
 git push
 
+# 下拉
+## 1. 先看当前状态，确认没有未提交的改动
+git status
+
+## 2. 如果有未提交改动，先 stash 或 commit
+git stash        # 暂存
+# 或
+git add . && git commit -m "xxx"
+
+## 3. 拉取最新代码（推荐用 rebase 保持历史干净）
+git pull --rebase
+
+## 4. 如果之前 stash 了，恢复
+git stash pop
+
 pull异常：
 sudo chown -R admin:admin ~/mcp-agent-runtime/.git
 git pull
