@@ -377,6 +377,17 @@ bool MCPAgentIntegration::initializeRAG() {
         if (!tool_cache_.empty()) {
             tool_retriever_->indexTools(tool_cache_);
         }
+
+        // ToolRetriever::addTool logs individual embedding failures and continues.
+        // Do not report an active RAG chain when the discovered tools were not indexed.
+        if (tool_cache_.empty() || tool_retriever_->getIndexSize() != tool_cache_.size()) {
+            LOG_ERROR("RAG index is incomplete: indexed " +
+                      std::to_string(tool_retriever_->getIndexSize()) + " of " +
+                      std::to_string(tool_cache_.size()) + " tools");
+            tool_retriever_->shutdown();
+            tool_retriever_.reset();
+            return false;
+        }
         
         rag_initialized_ = true;
         LOG_INFO("RAG-MCP initialized successfully");

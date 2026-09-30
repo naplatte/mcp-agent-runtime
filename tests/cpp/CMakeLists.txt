@@ -20,3 +20,8 @@ target_include_directories(test_mcp_integration PRIVATE
 )
 
 target_compile_features(test_mcp_integration PRIVATE cxx_std_20)
+
+# 独立的在线端到端场景：集成层 + C++ RAG + stdio Tool + 外部模型。
+add_executable(test_rag_agent_e2e test_rag_agent_e2e.cpp)
+target_link_libraries(test_rag_agent_e2e PRIVATE mcp_client CURL::libcurl)
+target_compile_features(test_rag_agent_e2e PRIVATE cxx_std_20)
