@@ -109,7 +109,9 @@ namespace vx::mcp {
         }
 
         transport_ = transport; // 保存传输层指针
-        isStopping_ = false; // 重置停止标志
+        isStopping_ = false;
+        request_worker_running_ = true;
+        request_thread_ = std::thread(&Server::RequestLoop, this); // 重置停止标志
 
         // 启动写指针
         writer_running_ = true;
@@ -118,6 +120,7 @@ namespace vx::mcp {
         // 启动传输层；HTTP 传输需要真正启动服务，stdio 通常直接返回 true
         if (!transport_->Start()) {
             LOG(ERROR) << "Failed to start transport: " << transport_->GetName() << std::endl;
+            Stop();
             return false;
         }
 
@@ -139,15 +142,7 @@ namespace vx::mcp {
                 json request = json::parse(json_string);
                 parserErrors_ = 0; // 重置解析错误计数
 
-                // 调用HandleRequest()
-                json response = HandleRequest(request);
-
-                // 将response写回给client
-                if (response != nullptr) {
-                    std::lock_guard<std::mutex> lock(output_mutex_);
-                    LOG(DEBUG) << "Sending Response: " << response.dump() << std::endl;
-                    transport_->Write(response.dump());
-                }
+                DispatchRequest(request);
             } catch (json::parse_error &e) {
                 // 解析失败时暂不退出进程，只限制连续解析错误次数
                 LOG(ERROR) << "Error parsing JSON: " << e.what() << std::endl;
@@ -155,6 +150,7 @@ namespace vx::mcp {
             }
         }
 
+        StopRequestWorker(false); // Drain replies after a stdio half-close.
         Stop();
 
         return true;
@@ -168,10 +164,14 @@ namespace vx::mcp {
 
         transport_ = transport;
         isStopping_ = false;
+        request_worker_running_ = true;
+        request_thread_ = std::thread(&Server::RequestLoop, this);
 
         // 启动写线程
         writer_running_ = true;
         writer_thread_ = std::thread(&Server::WriterLoop, this);
+
+        if (!transport_->Start()) { Stop(); return false; }
 
         // 启动异步读线程
         reader_running_ = true;
@@ -192,12 +192,7 @@ namespace vx::mcp {
                         json request = json::parse(json_string);
                         parserErrors_ = 0;
 
-                        json response = HandleRequest(request);
-                        if (response != nullptr) {
-                            std::lock_guard<std::mutex> lock(output_mutex_);
-                            LOG(DEBUG) << "Sending Response: " << response.dump() << std::endl;
-                            transport_->Write(response.dump());
-                        }
+                        DispatchRequest(request);
                     }
                 } catch (json::parse_error &e) {
                     LOG(ERROR) << "Error parsing JSON: " << e.what() << std::endl;
@@ -219,34 +214,94 @@ namespace vx::mcp {
     }
 
     void Server::Stop() {
-        LOG(INFO) << "Stopping server..." << std::endl;
-
         isStopping_ = true;
-
-        // 停止传输层；HTTP 传输会关闭服务，stdio 可以是空操作
-        if (transport_) {
-            LOG(INFO) << "Stopping transport..." << std::endl;
-            transport_->Stop();
-            transport_.reset();
-            LOG(INFO) << "Transport stopped." << std::endl;
-        }
-
-        // 通知并等待写线程退出
+        StopRequestWorker(true);
         writer_running_ = false;
-        queue_cv_.notify_one(); // 如果写线程正在等待，则唤醒它
-        if (writer_thread_.joinable()) {
-            writer_thread_.join();
-            LOG(INFO) << "Writer thread joined." << std::endl;
-        }
-
-        // 如果异步读线程存在，则等待它退出
+        queue_cv_.notify_all();
+        if (writer_thread_.joinable()) writer_thread_.join();
         reader_running_ = false;
-        if (reader_thread_.joinable()) {
-            reader_thread_.join();
-            LOG(INFO) << "Reader thread joined." << std::endl;
-        }
+        if (transport_) transport_->Stop();
+        if (reader_thread_.joinable() && reader_thread_.get_id() != std::this_thread::get_id()) reader_thread_.join();
+        transport_.reset();
+    }
 
-        LOG(INFO) << "Server stopped." << std::endl;
+    void Server::DispatchRequest(const json& request) {
+        if (!request.is_object() || !request.contains("method") || !request["method"].is_string()) {
+            std::lock_guard<std::mutex> output_lock(output_mutex_);
+            transport_->Write(MCPBuilder::Error(MCPBuilder::InvalidRequest,
+                request.is_object() ? request.value("id", json(nullptr)) : json(nullptr), "Invalid request").dump());
+            return;
+        }
+        const std::string method = request["method"].get<std::string>();
+        const bool has_id = request.is_object() && request.contains("id") && !request["id"].is_null();
+        if (has_id && (method == "tools/call" || method == "prompts/get" || method == "resources/read")) {
+            auto cancelled = std::make_shared<std::atomic<bool>>(false);
+            const std::string key = request["id"].dump();
+            {
+                std::lock_guard<std::mutex> lock(request_mutex_);
+                if (request_cancellations_.count(key) || request_queue_.size() >= 256) {
+                    std::lock_guard<std::mutex> output_lock(output_mutex_);
+                    transport_->Write(MCPBuilder::Error(MCPBuilder::InvalidRequest, request["id"],
+                        "Duplicate request ID or server busy").dump());
+                    return;
+                }
+                request_cancellations_[key] = cancelled;
+                request_queue_.push({request, cancelled});
+            }
+            request_cv_.notify_one();
+            return;
+        }
+        json response = HandleRequest(request);
+        if (has_id && !response.is_null()) {
+            std::lock_guard<std::mutex> lock(output_mutex_);
+            transport_->Write(response.dump());
+        }
+    }
+
+    void Server::RequestLoop() {
+        for (;;) {
+            PendingRequest pending;
+            {
+                std::unique_lock<std::mutex> lock(request_mutex_);
+                request_cv_.wait(lock, [this] { return !request_worker_running_ || !request_queue_.empty(); });
+                if (request_queue_.empty() && !request_worker_running_) return;
+                pending = std::move(request_queue_.front());
+                request_queue_.pop();
+            }
+            json response = nullptr;
+            if (!pending.cancelled->load()) {
+                try {
+                    response = HandleRequest(pending.request);
+                } catch (const std::exception& error) {
+                    response = MCPBuilder::Error(MCPBuilder::InternalError, pending.request["id"], error.what());
+                }
+            }
+            // Serialize cancellation with response delivery; a cancelled job never publishes a late reply.
+            std::lock_guard<std::mutex> lock(request_mutex_);
+            if (!pending.cancelled->load() && !response.is_null()) {
+                std::lock_guard<std::mutex> output_lock(output_mutex_);
+                transport_->Write(response.dump());
+            }
+            request_cancellations_.erase(pending.request["id"].dump());
+        }
+    }
+
+    void Server::StopRequestWorker(bool cancel_pending) {
+        {
+            std::lock_guard<std::mutex> lock(request_mutex_);
+            request_worker_running_ = false;
+            if (cancel_pending) {
+                for (auto& [id, cancelled] : request_cancellations_) cancelled->store(true);
+            }
+        }
+        request_cv_.notify_all();
+        if (request_thread_.joinable()) request_thread_.join();
+    }
+
+    std::shared_ptr<std::atomic<bool>> Server::GetCancellationToken(const json& request_id) const {
+        std::lock_guard<std::mutex> lock(request_mutex_);
+        auto it = request_cancellations_.find(request_id.dump());
+        return it == request_cancellations_.end() ? nullptr : it->second;
     }
 
     void Server::SendNotification(const std::string& pluginName, const char* notification) {
@@ -488,6 +543,18 @@ namespace vx::mcp {
     }
 
     json Server::NotificationCancelledCmd(const json &request) {
+        if (!request.contains("params") || !request["params"].is_object() ||
+            !request["params"].contains("requestId")) return nullptr;
+        const auto& id = request["params"]["requestId"];
+        if (!id.is_string() && !id.is_number_integer()) return nullptr;
+        const std::string key = id.dump();
+        {
+            std::lock_guard<std::mutex> lock(request_mutex_);
+            auto it = request_cancellations_.find(key);
+            if (it == request_cancellations_.end()) return nullptr;
+            it->second->store(true);
+        }
+        transport_->CancelRequest(key);
         return nullptr;
     }
 
@@ -520,26 +587,6 @@ namespace vx::mcp {
     }
 
     void Server::StopAsync() {
-        if (isStopping_) return;
-
-        isStopping_ = true;
-        LOG(INFO) << "Stopping async server..." << std::endl;
-
-        // 停止写线程
-        writer_running_ = false;
-        queue_cv_.notify_one();
-        if (writer_thread_.joinable()) {
-            writer_thread_.join();
-            LOG(INFO) << "Writer thread joined." << std::endl;
-        }
-
-        // 停止读线程
-        reader_running_ = false;
-        if (reader_thread_.joinable()) {
-            reader_thread_.join();
-            LOG(INFO) << "Reader thread joined." << std::endl;
-        }
-
-        LOG(INFO) << "Async server stopped." << std::endl;
+        Stop();
     }
 }

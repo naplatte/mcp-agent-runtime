@@ -4,6 +4,68 @@ MCP 协议的完整 C++ 实现，包含 MCP 客户端、MCP 服务器和 RAG-MCP
 
 从 [agent-communication](../) 项目中独立提取的子项目。
 
+## 请求超时、取消与 SSE 保活
+
+客户端的 `MCPConnectionConfig` 支持以下配置：
+
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `request_timeout_ms` | 30000 ms | stdio / HTTP 单次请求的等待期限 |
+| `connect_timeout_ms` | 5000 ms | HTTP 建立连接的等待期限 |
+| `cancellation_timeout_ms` | 1000 ms | HTTP 取消通知的发送期限，后台发送，不延长原请求等待 |
+
+每个请求按独立的 `id` 保存等待状态。超时会返回客户端本地错误
+`MCPResponse{is_error=true, error="Request timeout"}`，移除等待项，并尽力发送无 `id` 的
+`notifications/cancelled`。之后收到的迟到响应、未知响应和重复响应会被丢弃，不会误交给下一个调用。
+超时不需要等待服务端再返回 `result` 或 `error`。收到响应时，顶层 `error` 和工具结果中的
+`result.isError` 仍分别表示协议/请求失败与工具执行失败；本改动不自动重试工具调用。
+
+服务端将工具执行放到独立工作线程中，读线程可以同时接收取消通知。等待中的任务会跳过执行；
+执行中的任务通过取消标记协作退出；已取消任务的响应会被抑制。插件执行保持串行，避免旧插件突然
+面临多个调用并发执行。原有 `PluginAPI` 的布局保持兼容，插件可以额外导出：
+
+```cpp
+extern "C" PLUGIN_API char* HandleRequestWithContext(
+    const char* request, const PluginRequestContext* context);
+```
+
+插件在执行期间调用 `context->IsCancelled(context->user_data)` 检查取消信号。
+上下文只在本次调用期间有效，不能保存在插件中继续使用。内置 `sleep` 插件已接入，约每 10 ms
+检查一次；未接入的旧插件仍可以加载，但执行中的阻塞操作无法被框架强制中止，仍可能占用工作线程。
+取消也不能撤销已经产生的外部副作用。
+
+HTTP 服务端可以分别配置响应等待期限和保活周期：
+
+```bash
+./build/mcp_server/mcp_server -p ./build/mcp_server/plugins \
+  --streamable-http --http-port 8080 \
+  --request-timeout-ms 30000 --sse-keepalive-ms 15000
+```
+
+响应等待超时会返回对应 `id` 的 JSON-RPC 错误，并取消服务端任务。
+SSE 使用 `: keepalive` 注释帧，默认每 15 秒一次，`--sse-keepalive-ms 0` 可以关闭。
+保活帧维持 HTTP 事件流，不表示工具已经完成，也不会重置工具调用的超时期限。
+客户端的 GET 通知流保持长连接，不再每两秒因本地超时断开；主动断开客户端时会停止接收。
+stdio 没有新增定时心跳线程，连接断开通过 EOF/读写失败处理；现有 `ping` 方法仍保留。
+
+**协议范围：** 当前项目仍按 `2025-11-25` 的初始化及消息结构工作，本次是超时与连接生命周期改进，
+没有完成整个 `2026-07-28` 协议升级。C++ HTTP 客户端额外发送项目扩展头
+`X-MCP-Cancel-On-Disconnect: true`，显式启用「单次请求使用 SSE 返回，关闭该请求流即取消任务」。
+这不是 MCP 标准头。没有该头的客户端仍收到 JSON 响应，并通过 `notifications/cancelled` 显式取消；
+GET 通知流断开不会取消所有工具调用。C++ 客户端发生 HTTP 超时时，也会尽力发送取消通知，兼容忽略
+该扩展头的服务端。
+
+### 离线回归测试（Linux / WSL）
+
+```bash
+cmake -S . -B build -DBUILD_TESTS=ON -DBUILD_MCP_EXAMPLES=OFF
+cmake --build build -j 4
+ctest --test-dir build --output-on-failure -R mcp_timeouts
+```
+
+测试覆盖 stdio / HTTP 超时、协作取消、独立关闭请求流、服务端等待期限、乱序/迟到响应、
+意外 EOF 后重连、主动断开唤醒等待，以及分片 SSE 解析和 GET 长连接；不依赖模型或天气 API。
+
 ## 使用doxyfile构建：
 ```
 doxygen Doxyfile

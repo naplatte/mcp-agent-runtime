@@ -23,6 +23,8 @@
 //
 
 #include <thread>
+#include <algorithm>
+#include <cstring>
 #include "PluginAPI.h"
 #include "json.hpp"
 
@@ -52,26 +54,44 @@ int InitializeImpl() {
     return 1;
 }
 
-char* HandleRequestImpl(const char* req) {
+char* HandleRequestWithContextImpl(const char* req, const PluginRequestContext* context) {
     auto request = json::parse(req);
 
     auto milliseconds = request["params"]["arguments"]["milliseconds"].get<int>();
-    std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+    bool cancelled = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (context && context->IsCancelled && context->IsCancelled(context->user_data)) {
+            cancelled = true;
+            break;
+        }
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        std::this_thread::sleep_for(std::min(remaining,
+            std::chrono::steady_clock::duration(std::chrono::milliseconds(10))));
+    }
 
     nlohmann::json responseContent;
     responseContent["type"] = "text";
-    responseContent["text"] = "Waited for " + std::to_string(milliseconds) + " milliseconds";
+    responseContent["text"] = cancelled ? "Request cancelled" : "Waited for " + std::to_string(milliseconds) + " milliseconds";
 
     nlohmann::json response;
     response["content"] = json::array();
     response["content"].push_back(responseContent);
-    response["isError"] = false;
+    response["isError"] = cancelled;
 
     std::string result = response.dump();
     char* buffer = new char[result.length() + 1];
     strcpy(buffer, result.c_str());
 
     return buffer;
+}
+
+char* HandleRequestImpl(const char* req) {
+    return HandleRequestWithContextImpl(req, nullptr);
+}
+
+extern "C" PLUGIN_API char* HandleRequestWithContext(const char* req, const PluginRequestContext* context) {
+    return HandleRequestWithContextImpl(req, context);
 }
 
 void ShutdownImpl() {

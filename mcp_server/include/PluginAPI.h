@@ -63,6 +63,13 @@ typedef struct {
     ClientNotificationCallback SendToClient;    // 由 server 注入，插件侧不应修改
 } NotificationSystem;
 
+// Optional export: the original PluginAPI layout/ABI is unchanged.
+typedef struct {
+    void* user_data;
+    int (*IsCancelled)(void* user_data);
+} PluginRequestContext;
+typedef char* (*HandleRequestWithContextFn)(const char* request, const PluginRequestContext* context);
+
 typedef struct {
     const char* (*GetName)();
     const char* (*GetVersion)();

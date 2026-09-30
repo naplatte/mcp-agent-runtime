@@ -11,8 +11,7 @@
 namespace vx::transport {
 
 namespace {
-constexpr auto kPostResponseTimeout = std::chrono::seconds(30);
-constexpr auto kPingInterval = std::chrono::seconds(15);
+constexpr auto kPollInterval = std::chrono::milliseconds(50);
 
 bool HeaderContains(const httplib::Request& req, const std::string& name, const std::string& value) {
     if (!req.has_header(name)) {
@@ -35,9 +34,11 @@ bool OriginMatchesHost(const std::string& origin, const std::string& host) {
 }
 } // namespace
 
-StreamableHttp::StreamableHttp(const int port, std::string host)
+StreamableHttp::StreamableHttp(const int port, std::string host, int response_timeout_ms, int keep_alive_interval_ms)
     : host_(std::move(host)),
       port_(port),
+      response_timeout_ms_(response_timeout_ms),
+      keep_alive_interval_ms_(keep_alive_interval_ms),
       session_id_(vx::utils::SessionBuilder::GenerateUniqueSessionID()),
       server_(std::make_unique<httplib::Server>()) {
     SetupRoutes();
@@ -69,23 +70,51 @@ void StreamableHttp::Write(const std::string& json_data) {
         {
             std::lock_guard<std::mutex> lock(pending_mutex_);
             auto it = pending_responses_.find(id);
-            if (it != pending_responses_.end()) {
-                pending = it->second;
-            }
+            if (it != pending_responses_.end()) pending = it->second;
         }
-
         if (pending) {
-            {
-                std::lock_guard<std::mutex> lock(pending->mutex);
+            std::lock_guard<std::mutex> lock(pending->mutex);
+            if (!pending->cancelled && !pending->ready) {
                 pending->body = json_data;
                 pending->ready = true;
+                pending->cv.notify_one();
             }
-            pending->cv.notify_one();
-            return;
         }
+        return; // A late response must never leak into the notification stream.
     }
-
     QueueStreamMessage(json_data);
+}
+
+void StreamableHttp::CancelRequest(const std::string& request_id) {
+    std::shared_ptr<PendingResponse> pending;
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        auto it = pending_responses_.find(request_id);
+        if (it != pending_responses_.end()) pending = it->second;
+    }
+    if (pending) {
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        pending->cancelled = true;
+        pending->cv.notify_one();
+    }
+}
+
+void StreamableHttp::RemovePendingResponse(const std::string& id, const std::shared_ptr<PendingResponse>& pending) {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto it = pending_responses_.find(id);
+    if (it != pending_responses_.end() && it->second == pending) pending_responses_.erase(it);
+}
+
+void StreamableHttp::QueueCancellation(const std::string& request_id) {
+    auto notification = nlohmann::json{
+        {"jsonrpc", "2.0"}, {"method", "notifications/cancelled"},
+        {"params", {{"requestId", nlohmann::json::parse(request_id)}, {"reason", "HTTP request abandoned"}}}
+    };
+    {
+        std::lock_guard<std::mutex> lock(incoming_mutex_);
+        incoming_messages_.push(notification.dump());
+    }
+    incoming_cv_.notify_one();
 }
 
 std::future<std::pair<size_t, std::string>> StreamableHttp::ReadAsync() {
@@ -182,19 +211,19 @@ void StreamableHttp::SetupRoutes() {
 
 void StreamableHttp::HandleMcpPost(const httplib::Request& req, httplib::Response& res) {
     SetCommonHeaders(res);
-
-    if (!ValidateOrigin(req, res) || !ValidateSession(req, res)) {
-        return;
-    }
-
-    if (req.body.empty()) {
+    if (!ValidateOrigin(req, res) || !ValidateSession(req, res)) return;
+    auto request = nlohmann::json::parse(req.body, nullptr, false);
+    if (!request.is_object() || !request.contains("method") || !request["method"].is_string()) {
         res.status = 400;
-        res.set_content("{\"error\":\"Empty message\"}", "application/json");
+        res.set_content("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}", "application/json");
         return;
     }
-
     const std::string id = ExtractMessageId(req.body);
     if (id.empty()) {
+        if (request.contains("id")) {
+            res.status = 400;
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(incoming_mutex_);
             incoming_messages_.push(req.body);
@@ -203,105 +232,140 @@ void StreamableHttp::HandleMcpPost(const httplib::Request& req, httplib::Respons
         res.status = 202;
         return;
     }
-
     auto pending = std::make_shared<PendingResponse>();
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
-        pending_responses_[id] = pending;
+        if (!pending_responses_.emplace(id, pending).second) {
+            res.status = 400;
+            res.set_content("{\"error\":\"Duplicate request ID\"}", "application/json");
+            return;
+        }
     }
-
     {
         std::lock_guard<std::mutex> lock(incoming_mutex_);
         incoming_messages_.push(req.body);
     }
     incoming_cv_.notify_one();
 
-    std::unique_lock<std::mutex> lock(pending->mutex);
-    const bool ready = pending->cv.wait_for(lock, kPostResponseTimeout, [pending]() {
-        return pending->ready;
-    });
-
-    {
-        std::lock_guard<std::mutex> pending_lock(pending_mutex_);
-        pending_responses_.erase(id);
-    }
-
-    if (!ready || pending->body.empty()) {
-        res.status = 504;
-        res.set_content("{\"error\":\"Timed out waiting for JSON-RPC response\"}", "application/json");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(response_timeout_ms_);
+    const bool cancel_on_disconnect = req.get_header_value("X-MCP-Cancel-On-Disconnect") == "true";
+    auto connection_closed = req.is_connection_closed;
+    auto timeout_body = [id]() {
+        return nlohmann::json{{"jsonrpc", "2.0"}, {"id", nlohmann::json::parse(id)},
+            {"error", {{"code", -32000}, {"message", "Server request timeout"}}}}.dump();
+    };
+    if (cancel_on_disconnect && HeaderContains(req, "Accept", "text/event-stream")) {
+        res.set_header("Cache-Control", "no-cache, no-transform");
+        res.set_header("X-Accel-Buffering", "no");
+        auto last_keepalive = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        auto finish = [this, id, pending, finished](bool cancel) {
+            if (finished->exchange(true)) return;
+            RemovePendingResponse(id, pending);
+            if (cancel && server_running_) QueueCancellation(id);
+        };
+        res.set_chunked_content_provider("text/event-stream",
+            [this, pending, deadline, last_keepalive, finish, connection_closed, timeout_body]
+            (size_t, httplib::DataSink& sink) -> bool {
+                std::unique_lock<std::mutex> lock(pending->mutex);
+                pending->cv.wait_for(lock, kPollInterval, [this, pending] {
+                    return pending->ready || pending->cancelled || !server_running_;
+                });
+                if (pending->cancelled || !server_running_ || connection_closed()) {
+                    lock.unlock();
+                    finish(true);
+                    return false;
+                }
+                if (pending->ready) {
+                    const std::string event = "data: " + pending->body + "\n\n";
+                    lock.unlock();
+                    const bool written = sink.write(event.data(), event.size());
+                    finish(false);
+                    if (written) sink.done();
+                    return written;
+                }
+                lock.unlock();
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
+                    const std::string event = "data: " + timeout_body() + "\n\n";
+                    const bool written = sink.write(event.data(), event.size());
+                    finish(true);
+                    if (written) sink.done();
+                    return written;
+                }
+                if (keep_alive_interval_ms_ > 0 && now - *last_keepalive >= std::chrono::milliseconds(keep_alive_interval_ms_)) {
+                    const std::string comment = ": keepalive\n\n";
+                    if (!sink.write(comment.data(), comment.size())) { finish(true); return false; }
+                    *last_keepalive = now;
+                }
+                return true;
+            },
+            [pending, finish](bool) {
+                bool unfinished;
+                {
+                    std::lock_guard<std::mutex> lock(pending->mutex);
+                    unfinished = !pending->ready;
+                }
+                finish(unfinished);
+            });
         return;
     }
 
-    res.status = 200;
-    res.set_content(pending->body, "application/json");
+    // Keep legacy JSON responses; stream disconnect cancellation is explicit opt-in.
+    std::unique_lock<std::mutex> lock(pending->mutex);
+    while (!pending->ready && !pending->cancelled && server_running_ &&
+           std::chrono::steady_clock::now() < deadline && !connection_closed()) {
+        pending->cv.wait_for(lock, kPollInterval);
+    }
+    const bool ready = pending->ready;
+    const bool cancelled = pending->cancelled;
+    const std::string body = pending->body;
+    lock.unlock();
+    RemovePendingResponse(id, pending);
+    if (!ready && !cancelled && (cancel_on_disconnect || std::chrono::steady_clock::now() >= deadline)) QueueCancellation(id);
+    if (cancelled || !server_running_ || connection_closed()) { res.status = 204; return; }
+    if (!ready) { res.status = 504; res.set_content(timeout_body(), "application/json"); return; }
+    res.set_content(body, "application/json");
 }
 
 void StreamableHttp::HandleMcpStream(const httplib::Request& req, httplib::Response& res) {
     SetCommonHeaders(res);
-
-    if (!ValidateOrigin(req, res) || !ValidateSession(req, res)) {
-        return;
-    }
-
+    if (!ValidateOrigin(req, res) || !ValidateSession(req, res)) return;
     if (!HeaderContains(req, "Accept", "text/event-stream")) {
         res.status = 406;
         res.set_content("{\"error\":\"GET /mcp requires Accept: text/event-stream\"}", "application/json");
         return;
     }
-
-    client_connected_.store(true);
-    stream_active_.store(true);
-    res.set_header("Content-Type", "text/event-stream");
-    res.set_header("Cache-Control", "no-cache");
-    res.set_header("Connection", "keep-alive");
-
-    auto last_ping = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
-
-    res.set_content_provider(
-        "text/event-stream",
-        [this, last_ping](size_t, httplib::DataSink& sink) -> bool {
-            auto terminate = [this]() -> bool {
-                stream_active_.store(false);
-                client_connected_.store(false);
-                outgoing_cv_.notify_all();
-                incoming_cv_.notify_all();
-                return false;
-            };
-
-            try {
-                if (std::chrono::steady_clock::now() - *last_ping >= kPingInterval) {
-                    const char* ping = ": ping\n\n";
-                    if (!sink.write(ping, std::strlen(ping))) {
-                        return terminate();
-                    }
-                    *last_ping = std::chrono::steady_clock::now();
-                }
-
-                std::unique_lock<std::mutex> lock(outgoing_mutex_);
-                outgoing_cv_.wait_for(lock, std::chrono::milliseconds(200), [this]() {
-                    return !outgoing_stream_messages_.empty() || !stream_active_.load();
-                });
-
-                if (!stream_active_.load()) {
-                    return terminate();
-                }
-
-                if (!outgoing_stream_messages_.empty()) {
-                    std::string message = std::move(outgoing_stream_messages_.front());
-                    outgoing_stream_messages_.pop();
-                    lock.unlock();
-
-                    std::string event_msg = "data: " + message + "\n\n";
-                    if (!sink.write(event_msg.data(), event_msg.size())) {
-                        return terminate();
-                    }
-                }
-
-                return true;
-            } catch (const std::exception& ex) {
-                LOG(ERROR) << "Exception in Streamable HTTP content provider: " << ex.what() << std::endl;
-                return terminate();
+    client_connected_ = true;
+    stream_active_ = true;
+    res.set_header("Cache-Control", "no-cache, no-transform");
+    res.set_header("X-Accel-Buffering", "no");
+    auto last_keepalive = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+    auto connection_closed = req.is_connection_closed;
+    res.set_chunked_content_provider("text/event-stream",
+        [this, last_keepalive, connection_closed](size_t, httplib::DataSink& sink) -> bool {
+            if (!stream_active_ || !server_running_ || connection_closed()) return false;
+            const auto now = std::chrono::steady_clock::now();
+            if (keep_alive_interval_ms_ > 0 && now - *last_keepalive >= std::chrono::milliseconds(keep_alive_interval_ms_)) {
+                const std::string comment = ": keepalive\n\n";
+                if (!sink.write(comment.data(), comment.size())) return false;
+                *last_keepalive = now;
             }
+            std::unique_lock<std::mutex> lock(outgoing_mutex_);
+            outgoing_cv_.wait_for(lock, kPollInterval, [this] { return !outgoing_stream_messages_.empty() || !stream_active_; });
+            if (!stream_active_) return false;
+            if (!outgoing_stream_messages_.empty()) {
+                const std::string event = "data: " + outgoing_stream_messages_.front() + "\n\n";
+                outgoing_stream_messages_.pop();
+                lock.unlock();
+                return sink.write(event.data(), event.size());
+            }
+            return true;
+        },
+        [this](bool) {
+            stream_active_ = false;
+            client_connected_ = false;
+            outgoing_cv_.notify_all();
         });
 }
 
@@ -384,7 +448,7 @@ void StreamableHttp::SetCORSHeaders(httplib::Response& res) {
     res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.set_header(
         "Access-Control-Allow-Headers",
-        "Content-Type, Accept, Authorization, x-api-key, MCP-Session-Id, MCP-Protocol-Version");
+        "Content-Type, Accept, Authorization, x-api-key, MCP-Session-Id, MCP-Protocol-Version, X-MCP-Cancel-On-Disconnect");
     res.set_header(
         "Access-Control-Expose-Headers",
         "Content-Type, MCP-Session-Id, MCP-Protocol-Version");
@@ -397,9 +461,7 @@ std::string StreamableHttp::ExtractMessageId(const std::string& json_data) {
         if (!root.contains("id") || root["id"].is_null()) {
             return "";
         }
-        if (root["id"].is_string()) {
-            return root["id"].get<std::string>();
-        }
+        if (!root["id"].is_string() && !root["id"].is_number_integer()) return "";
         return root["id"].dump();
     } catch (...) {
         return "";

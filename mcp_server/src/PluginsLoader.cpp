@@ -67,6 +67,8 @@ namespace vx::mcp {
         // dlsym:根据给定的句柄 (handle) 和符号名 (symbol)，返回该符号在内存中的地址
         entry.createFunc = (PluginAPI * (*)())dlsym(entry.handle, "CreatePlugin");
         entry.destroyFunc = (void (*)(PluginAPI *))dlsym(entry.handle, "DestroyPlugin");
+        entry.handleRequestWithContext = reinterpret_cast<HandleRequestWithContextFn>(
+            dlsym(entry.handle, "HandleRequestWithContext"));
 
         // 检查是否找到了必需函数
         if (!entry.createFunc || !entry.destroyFunc) {

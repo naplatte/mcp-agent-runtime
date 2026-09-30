@@ -25,3 +25,13 @@ target_compile_features(test_mcp_integration PRIVATE cxx_std_20)
 add_executable(test_rag_agent_e2e test_rag_agent_e2e.cpp)
 target_link_libraries(test_rag_agent_e2e PRIVATE mcp_client CURL::libcurl)
 target_compile_features(test_rag_agent_e2e PRIVATE cxx_std_20)
+
+# Offline transport/lifecycle regression tests; no model or weather API required.
+add_executable(test_mcp_timeouts test_mcp_timeouts.cpp)
+target_link_libraries(test_mcp_timeouts PRIVATE mcp_client Threads::Threads)
+target_include_directories(test_mcp_timeouts PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
+target_compile_features(test_mcp_timeouts PRIVATE cxx_std_20)
+add_dependencies(test_mcp_timeouts mcp_server)
+add_test(NAME mcp_timeouts COMMAND test_mcp_timeouts
+    $<TARGET_FILE:mcp_server> ${CMAKE_BINARY_DIR}/mcp_server/plugins)
+set_tests_properties(mcp_timeouts PROPERTIES TIMEOUT 30)

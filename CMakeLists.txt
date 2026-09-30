@@ -28,6 +28,6 @@ endif()
 # 是否编译测试程序
 option(BUILD_TESTS "Build C++ test programs" ON)
 if(BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests/cpp)
 endif()
-

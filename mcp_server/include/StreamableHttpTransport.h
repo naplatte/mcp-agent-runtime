@@ -18,7 +18,8 @@ namespace vx::transport {
 
 class StreamableHttp : public vx::ITransport {
 public:
-    explicit StreamableHttp(int port = 8080, std::string host = "127.0.0.1");
+    explicit StreamableHttp(int port = 8080, std::string host = "127.0.0.1",
+                            int response_timeout_ms = 30000, int keep_alive_interval_ms = 15000);
     ~StreamableHttp();
 
     // 这个类只能原地创建、原地使用，不能复制搬家，避免服务器资源被重复管理或管理失控
@@ -30,6 +31,7 @@ public:
     // 读写/异步读写
     std::pair<size_t, std::string> Read() override;
     void Write(const std::string& json_data) override;
+    void CancelRequest(const std::string& request_id) override;
     std::future<std::pair<size_t, std::string>> ReadAsync() override;
     std::future<void> WriteAsync(const std::string& json_data) override;
 
@@ -50,6 +52,7 @@ private:
         std::condition_variable cv; // 让POST/mcp的线程睡着等待，直到response被write()写回
         std::string body;
         bool ready{false};
+        bool cancelled{false};
     };
 
     void SetupRoutes(); // 路由注册
@@ -58,6 +61,8 @@ private:
     void HandleMcpDelete(const httplib::Request& req, httplib::Response& res);
 
     void QueueStreamMessage(const std::string& json_data);
+    void QueueCancellation(const std::string& request_id);
+    void RemovePendingResponse(const std::string& id, const std::shared_ptr<PendingResponse>& pending);
     bool ValidateOrigin(const httplib::Request& req, httplib::Response& res) const;
     bool ValidateSession(const httplib::Request& req, httplib::Response& res) const;
     std::string GetSessionHeader(const httplib::Request& req) const;
@@ -68,6 +73,8 @@ private:
 
     std::string host_;
     int port_;
+    int response_timeout_ms_;
+    int keep_alive_interval_ms_;
     std::string session_id_;
     std::unique_ptr<httplib::Server> server_;
     std::thread server_thread_;

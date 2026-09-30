@@ -29,6 +29,9 @@
 #include <queue>
 #include <thread>
 #include <condition_variable>
+#include <atomic>
+#include <functional>
+#include <unordered_map>
 #include "ITransport.h"
 #include "json.hpp"
 
@@ -64,10 +67,14 @@ namespace vx::mcp {
 
         // 将插件要发给client的message，放在server的队列中等待后台写进程发送
         void SendNotification(const std::string& pluginName, const char* notification);
+        std::shared_ptr<std::atomic<bool>> GetCancellationToken(const json& request_id) const;
 
     private:
         void WriterLoop(); // 写线程，当队列为空时，该线程等待；当队列有通知时，将其写回给client
         json HandleRequest(const json& request);
+        void DispatchRequest(const json& request);
+        void RequestLoop();
+        void StopRequestWorker(bool cancel_pending);
 
         json InitializeCmd(const json& request);
         json PingCmd(const json& request);
@@ -97,7 +104,7 @@ namespace vx::mcp {
     private:
         std::unordered_map<std::string, std::function<json(const json&)>> functionMap;
 
-        bool isStopping_ = false;
+        std::atomic<bool> isStopping_{false};
         int verboseLevel_ = 0;
         int parserErrors_ = 0;
         std::string name_ = "mcp-server";
@@ -111,6 +118,16 @@ namespace vx::mcp {
 
         std::thread reader_thread_;
         std::atomic<bool> reader_running_ = false;
+        struct PendingRequest {
+            json request;
+            std::shared_ptr<std::atomic<bool>> cancelled;
+        };
+        std::queue<PendingRequest> request_queue_;
+        std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> request_cancellations_;
+        mutable std::mutex request_mutex_;
+        std::condition_variable request_cv_;
+        std::thread request_thread_;
+        bool request_worker_running_ = false;
     };
 
 }

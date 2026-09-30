@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <queue>
 #include <atomic>
+#include <chrono>
 #include "agent_rpc/common/logger.h"
 
 namespace agent_rpc {
@@ -70,6 +71,7 @@ struct MCPConnectionConfig {
     std::string api_key;                        // API Key（可选）
     int connect_timeout_ms = 5000;              // 连接超时
     int request_timeout_ms = 30000;             // 请求超时
+    int cancellation_timeout_ms = 1000;         // 取消通知的发送上限，不延长原请求等待
     bool verify_ssl = true;                     // 是否验证 SSL 证书
 };
 
@@ -133,7 +135,11 @@ public:
 private:
     // 内部通信（通用）
     bool sendRequest(const MCPRequest& request);
-    MCPResponse receiveResponse();
+    MCPResponse executeRequest(const MCPRequest& request);
+    MCPResponse receiveResponse(const MCPRequest& request);
+    void publishResponse(const MCPResponse& response);
+    void cancelRequest(const MCPRequest& request);
+    void processCancellations();
     
     // STDIO 模式
     bool startMCPServer();
@@ -148,8 +154,6 @@ private:
     void processStreamableHttpEvents();
     void handleStreamableHttpEvent(const std::string& event_data);
     std::string getMcpEndpoint() const;
-    static size_t streamableHttpEventCallback(char* ptr, size_t size, size_t nmemb, void* userdata);
-    static size_t streamableHttpHeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata);
     
     // 消息处理
     std::string buildJSONRPCRequest(const MCPRequest& request);
@@ -173,13 +177,25 @@ private:
     // Streamable HTTP 模式相关
     void* curl_handle_{nullptr};        // CURL 句柄
     std::string session_id_;            // MCP HTTP 会话 ID
-    std::string stream_response_buffer_;// HTTP stream 响应缓冲
     std::thread stream_event_thread_;   // Streamable HTTP 事件监听线程
+    std::mutex session_mutex_;
     
     // 消息队列
-    std::queue<MCPResponse> response_queue_;
+    struct PendingRequest {
+        MCPResponse response;
+        bool ready = false;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::map<std::string, PendingRequest> pending_requests_;
+    std::string request_id_prefix_;
+    std::atomic<unsigned long long> next_request_id_{0};
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
+    std::mutex stdio_write_mutex_;
+    std::queue<MCPRequest> cancellation_queue_;
+    std::mutex cancellation_mutex_;
+    std::condition_variable cancellation_cv_;
+    std::thread cancellation_thread_;
     
     // 通知回调
     std::function<void(const std::string&, const std::string&)> notification_callback_;

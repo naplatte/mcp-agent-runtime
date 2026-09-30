@@ -32,6 +32,7 @@ namespace vx {
 
     class ITransport {
     public:
+        virtual ~ITransport() = default;
         // 生命周期
         virtual bool Start() = 0;
         virtual void Stop() = 0;
@@ -40,6 +41,8 @@ namespace vx {
         // 读写
         virtual std::pair<size_t, std::string> Read() = 0;
         virtual void Write(const std::string& json_data) = 0;
+        // JSON-encoded IDs keep numeric and string request IDs distinct.
+        virtual void CancelRequest(const std::string& request_id) {}
 
         // 异步读写
         virtual std::future<std::pair<size_t, std::string>> ReadAsync() = 0;

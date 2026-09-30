@@ -62,11 +62,24 @@ void ClientNotificationCallbackImpl(const char* pluginName, const char* notifica
 }
 
 /// 主入口
+char* ExecutePluginRequest(const vx::mcp::PluginEntry& plugin, const json& request) {
+    const std::string payload = request.dump();
+    if (!plugin.handleRequestWithContext) return plugin.instance->HandleRequest(payload.c_str());
+    auto token = server->GetCancellationToken(request.value("id", json(nullptr)));
+    PluginRequestContext context{
+        token.get(),
+        [](void* user_data) -> int {
+            return user_data && static_cast<std::atomic<bool>*>(user_data)->load();
+        }
+    };
+    return plugin.handleRequestWithContext(payload.c_str(), &context);
+}
+
 int main(int argc, char **argv) {
     std::string name;
     std::string plugins_directory;
     std::string logs_directory;
-    bool verbose;
+    bool verbose = false;
 
     // 三大核心
     std::shared_ptr<vx::ITransport> transport;
@@ -89,6 +102,9 @@ int main(int argc, char **argv) {
     auto logs_directory_option = op.add<Value<std::string>>("l", "logs", "the directory where to store the logs", "./logs");
     auto verbose_option = op.add<Value<bool>>("v", "verbose", "enable verbose", verbose);
     auto use_streamable_http_server = op.add<Switch>("", "streamable-http", "start as Streamable HTTP server");
+    auto http_port = op.add<Value<int>>("", "http-port", "HTTP listen port", 8080);
+    auto request_timeout = op.add<Value<int>>("", "request-timeout-ms", "HTTP response timeout", 30000);
+    auto sse_keepalive = op.add<Value<int>>("", "sse-keepalive-ms", "SSE keepalive interval (0 disables)", 15000);
     name_option->assign_to(&name);
     plugins_directory_option->assign_to(&plugins_directory);
     logs_directory_option->assign_to(&logs_directory);
@@ -115,7 +131,12 @@ int main(int argc, char **argv) {
     // 选择传输方式
     //============================================================================================
     if (use_streamable_http_server->is_set()) {
-        transport = std::make_shared<vx::transport::StreamableHttp>();
+        if (request_timeout->value() <= 0 || sse_keepalive->value() < 0) {
+            std::cerr << "Invalid HTTP timeout or SSE keepalive interval" << std::endl;
+            return 1;
+        }
+        transport = std::make_shared<vx::transport::StreamableHttp>(
+            http_port->value(), "127.0.0.1", request_timeout->value(), sse_keepalive->value());
     } else {
         transport = std::make_shared<vx::transport::Stdio>();
     }
@@ -217,12 +238,12 @@ int main(int argc, char **argv) {
                     // 按工具名匹配请求中指定的工具
                     if (pluginTool->name == request["params"]["name"]) {
                         // 将请求序列化后交给插件处理
-                        res_ptr = plugin.instance->HandleRequest(request.dump().c_str());
+                        res_ptr = ExecutePluginRequest(plugin, request);
                         if (res_ptr) {
                             // 尝试将插件返回的字符串解析为 JSON
                             try {
                                 response["result"] = json::parse(res_ptr);
-                                response["result"]["isError"] = false;
+                                if (!response["result"].contains("isError")) response["result"]["isError"] = false;
                             } catch (const json::parse_error& e) {
                                 // 解析失败：返回错误提示
                                 response["result"]["isError"] = true;

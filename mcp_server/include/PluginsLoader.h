@@ -48,6 +48,7 @@ namespace vx::mcp {
         // 函数指针
         PluginAPI* (*createFunc)();
         void (*destroyFunc)(PluginAPI*);
+        HandleRequestWithContextFn handleRequestWithContext = nullptr;
     };
 
     class PluginsLoader {
