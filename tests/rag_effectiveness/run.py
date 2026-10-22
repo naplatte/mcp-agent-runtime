@@ -192,10 +192,13 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                     for arm in (("all", "rag") if (i + repeat) % 2 else ("rag", "all")):
                         supplied = tools if arm == "all" else selected
                         timing = retrieval[case["id"]]
+                        expected_names = [c["name"] for c in case["expected_calls"]]
                         record = {"size": size, "arm": arm, "repeat": repeat, "id": case["id"],
                                   "kind": case["kind"], "question": case["question"],
-                                  "expected_names": [c["name"] for c in case["expected_calls"]],
+                                  "expected_names": expected_names,
                                   "candidate_names": [t["name"] for t in supplied],
+                                  # 候选里是否已包含全部目标工具：用于把「召回失败」和「模型选错」分开
+                                  "retrieval_hit": set(expected_names) <= {t["name"] for t in supplied},
                                   "retrieval_ms": 0.0 if arm == "all" else (timing["retrieval_ms"] if repeat == 1 else warm[case["id"]]["retrieval_ms"]),
                                   "warm_retrieval_ms": 0.0 if arm == "all" else warm[case["id"]]["retrieval_ms"],
                                   "query_cache_misses": 0 if arm == "all" or repeat > 1 else timing["cache_misses"]}

@@ -104,9 +104,16 @@ def mean(values):
 
 def aggregate(records):
     valid = [r for r in records if not r.get("api_error")]
+    hit = [r for r in valid if r.get("retrieval_hit", True)]
     return {"requests": len(records), "valid": len(valid), "api_errors": len(records) - len(valid),
             "selection_accuracy": mean([int(r["selection_correct"]) for r in valid]),
             "accuracy": mean([int(r["correct"]) for r in valid]),
+            # 候选里已含全部目标工具的题上，模型自己的正确率
+            "accuracy_on_hit": mean([int(r["correct"]) for r in hit]),
+            "hit_count": len(hit), "miss_count": len(valid) - len(hit),
+            "retrieval_fail": len(valid) - len(hit),
+            "selection_fail": sum(1 for r in hit if not r.get("selection_correct")),
+            "argument_fail": sum(1 for r in hit if r.get("selection_correct") and not r.get("correct")),
             "prompt_tokens": mean([r["prompt_tokens"] for r in valid]),
             "model_ms": mean([r["model_ms"] for r in valid]),
             "total_ms": mean([r["model_ms"] + r["retrieval_ms"] for r in valid]),
@@ -147,13 +154,16 @@ def report(data, directory):
                      f"| {percent(metric.get('recall'))} |")
 
     lines += ["", "## 3. 全量工具 vs RAG 筛选", "",
-              "| 目录 | 方式 | 调用正确率 | 工具选择正确率 | 平均输入 token |",
-              "|---:|---|---:|---:|---:|"]
+              "命中题正确率＝候选里已含全部目标工具的那些题上，模型自己的正确率；用它区分“召回没给到”和“给了但选错”。",
+              "",
+              "| 目录 | 方式 | 调用正确率 | 命中题正确率 | 工具选择正确率 | 平均输入 token |",
+              "|---:|---|---:|---:|---:|---:|"]
     for stage in data["stages"]:
         for arm, label in (("all", "全量"), ("rag", f"RAG k={stage['k']}")):
             row = stage["summary"][arm]
             lines.append(f"| {stage['size']} | {label} | {percent(row['accuracy'])} "
-                         f"| {percent(row['selection_accuracy'])} | {number(row['prompt_tokens'])} |")
+                         f"| {percent(row.get('accuracy_on_hit'))} | {percent(row['selection_accuracy'])} "
+                         f"| {number(row['prompt_tokens'])} |")
 
     lines += ["", "## 4. 可以直接说的结论", ""]
     for stage in data["stages"]:
@@ -165,6 +175,11 @@ def report(data, directory):
         lines.append(f"- {stage['size']} 个工具：输入 token 降 {percent(savings)}，"
                      f"调用正确率 {percent(base['accuracy'])} → {percent(rag['accuracy'])}"
                      f"（{'+' if (delta or 0) >= 0 else ''}{number(delta)} 个百分点）。")
+        if rag.get("hit_count"):
+            lines.append(f"  RAG 召回到位的 {rag['hit_count']} 题上正确率 {percent(rag['accuracy_on_hit'])}"
+                         f"（全量同档 {percent(base.get('accuracy_on_hit'))}）；"
+                         f"失败归因：漏召回 {rag['retrieval_fail']} 题、选错工具 {rag['selection_fail']} 题、"
+                         f"参数错 {rag['argument_fail']} 题。")
     if data["stages"]:
         last = data["stages"][-1]["summary"]
         lines.append(f"- 无需工具题正确率：全量 {percent(last['all']['no_tool_accuracy'])} / "
@@ -178,10 +193,21 @@ def report(data, directory):
         lines.append("本次没有失败记录。")
     for r in failures[:8]:
         reason = r.get("api_error") or "；".join(r.get("reasons", [])[:2])
-        lines.append(f"- [{r['size']}/{r['arm']}/{r['id']}] 预期 {r['expected_names']}，"
+        if r.get("api_error"):
+            tag = "接口异常"
+        elif not r.get("retrieval_hit", True):
+            tag = "漏召回"
+        elif not r.get("selection_correct"):
+            tag = "工具选错"
+        else:
+            tag = "参数错"
+        lines.append(f"- [{tag}][{r['size']}/{r['arm']}/{r['id']}] 预期 {r['expected_names']}，"
                      f"实际 {r.get('called', [])} —— {reason}")
     if len(failures) > 8:
         lines.append(f"- 其余 {len(failures) - 8} 条略。")
+
+    miss = sum(1 for r in data["records"] if not r.get("api_error") and not r.get("retrieval_hit", True))
+    lines.append(f"\n全部记录中，因候选缺工具直接判错的 {miss} 条；其余失败是模型选错工具或参数。")
 
     lines += ["", "## 6. 局限", "",
               "- 除 4 个真实工具外，其余为只有元数据的模拟定义，不执行真实业务。",
@@ -201,5 +227,8 @@ def console(data, directory):
         print(f"\n[{stage['size']} 个工具，k={stage['k']}，{stage.get('cases', 0)} 题]")
         print(f"  检索完整命中率 {percent(metric.get('complete'))}，平均召回 {percent(metric.get('recall'))}")
         print(f"  全量：调用正确率 {percent(base['accuracy'])}，token {number(base['prompt_tokens'])}")
-        print(f"  RAG ：调用正确率 {percent(rag['accuracy'])}，token {number(rag['prompt_tokens'])}")
+        print(f"  RAG ：调用正确率 {percent(rag['accuracy'])}，命中题正确率 {percent(rag.get('accuracy_on_hit'))}，"
+              f"token {number(rag['prompt_tokens'])}")
+        print(f"  RAG 失败归因：漏召回 {rag['retrieval_fail']}、选错工具 {rag['selection_fail']}、"
+              f"参数错 {rag['argument_fail']}")
     print(f"\n报告：{Path(directory) / 'report.md'}")
