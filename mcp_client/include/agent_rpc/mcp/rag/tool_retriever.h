@@ -34,6 +34,7 @@ struct RetrieverConfig {
     int validation_timeout_ms = 5000;     ///< 验证超时
     std::string index_path;               ///< 索引文件路径
     bool auto_save_index = true;          ///< 是否自动保存索引
+    MMRConfig mmr;                        ///< 可选 MMR，默认候选池 30、权重 0.7
 };
 
 /**
@@ -137,7 +138,7 @@ public:
     /**
      * @brief 检索相关工具
      * @param query 用户查询
-     * @return 检索到的工具列表，按相关性降序排列
+     * @return 普通模式按相关性排序，MMR 模式按逐次选择顺序返回
      */
     std::vector<RetrievedTool> retrieve(const std::string& query);
     
@@ -145,6 +146,10 @@ public:
      * @brief 检索相关工具（自定义 top_k）
      */
     std::vector<RetrievedTool> retrieve(const std::string& query, int top_k);
+
+    // 覆盖本次查询的选择策略，复用同一索引和查询向量缓存。
+    std::vector<RetrievedTool> retrieve(const std::string& query, int top_k, const MMRConfig& mmr,
+                                      std::vector<RetrievedTool>* ranking = nullptr);
     
     /**
      * @brief 获取所有工具（不进行检索）

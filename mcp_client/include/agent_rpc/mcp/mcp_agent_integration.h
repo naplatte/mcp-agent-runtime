@@ -37,6 +37,9 @@ struct RAGConfig {
     bool enable_cache = true;                 // 是否启用缓存
     size_t cache_max_size = 1000;             // 缓存最大条目
     int cache_ttl_seconds = 3600;             // 缓存过期时间
+    bool enable_mmr = false;                  // 是否使用 MMR 选择候选
+    int mmr_fetch_k = 30;                      // MMR 候选池上限
+    float mmr_lambda = 0.7f;                  // MMR 相关性权重
 };
 
 // MCP Agent 集成配置

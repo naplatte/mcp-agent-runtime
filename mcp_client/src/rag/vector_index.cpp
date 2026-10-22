@@ -14,12 +14,26 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <limits>
+#include <stdexcept>
 
 using json = nlohmann::json;
 
 namespace agent_rpc {
 namespace mcp {
 namespace rag {
+
+namespace {
+bool validEmbedding(const std::vector<float>& embedding, size_t dimension) {
+    if (embedding.empty() || embedding.size() != dimension) return false;
+    bool nonzero = false;
+    for (float value : embedding) {
+        if (!std::isfinite(value)) return false;
+        nonzero = nonzero || value != 0.0f;
+    }
+    return nonzero;
+}
+} // namespace
 
 void VectorIndex::addTool(const IndexedTool& tool) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -87,7 +101,8 @@ std::vector<SearchResult> VectorIndex::search(
     
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (tools_.empty() || query_embedding.empty()) {
+    if (top_k <= 0 || tools_.empty() ||
+        !validEmbedding(query_embedding, query_embedding.size())) {
         return {};
     }
     
@@ -97,7 +112,7 @@ std::vector<SearchResult> VectorIndex::search(
     
     for (const auto& pair : tools_) {
         const IndexedTool& tool = pair.second;
-        if (tool.embedding.empty()) {
+        if (!validEmbedding(tool.embedding, query_embedding.size())) {
             continue;
         }
         
@@ -112,7 +127,8 @@ std::vector<SearchResult> VectorIndex::search(
     // 按相似度降序排序
     std::sort(all_results.begin(), all_results.end(),
         [](const SearchResult& a, const SearchResult& b) {
-            return a.similarity > b.similarity;
+            if (a.similarity != b.similarity) return a.similarity > b.similarity;
+            return a.tool.name < b.tool.name;
         });
     
     // 应用阈值过滤
@@ -136,6 +152,52 @@ std::vector<SearchResult> VectorIndex::search(
     return filtered_results;
 }
 
+std::vector<SearchResult> VectorIndex::searchMMR(
+    const std::vector<float>& query_embedding,
+    int top_k,
+    const MMRConfig& config,
+    float threshold) const {
+    if (top_k <= 0 || config.fetch_k < top_k)
+        throw std::invalid_argument("MMR requires positive top_k and fetch_k >= top_k");
+    if (!std::isfinite(config.lambda) || config.lambda < 0.0f || config.lambda > 1.0f)
+        throw std::invalid_argument("MMR lambda must be finite and within [0, 1]");
+
+    // search 返回快照，后续两两比较无需长时间持有索引锁。
+    auto candidates = search(query_embedding, config.fetch_k, threshold);
+    const size_t limit = std::min(static_cast<size_t>(top_k), candidates.size());
+    if (candidates.empty() || config.lambda == 1.0f) {
+        candidates.resize(limit);
+        return candidates;
+    }
+
+    std::vector<SearchResult> result;
+    result.reserve(limit);
+    std::vector<bool> selected(candidates.size(), false);
+    std::vector<float> redundancy(candidates.size(), -1.0f);
+    size_t best = 0; // 第一个工具始终选择与原问题最相关的候选。
+    while (result.size() < limit) {
+        selected[best] = true;
+        result.push_back(candidates[best]);
+        if (result.size() == limit) break;
+        float best_score = -std::numeric_limits<float>::infinity();
+        size_t next = 0;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (selected[i]) continue;
+            redundancy[i] = std::max(redundancy[i], cosineSimilarity(
+                candidates[i].tool.embedding, candidates[best].tool.embedding));
+            const float score = config.lambda * candidates[i].similarity -
+                                (1.0f - config.lambda) * redundancy[i];
+            // 同分沿用候选池的相似度、工具名顺序，保证结果可复现。
+            if (score > best_score) {
+                best_score = score;
+                next = i;
+            }
+        }
+        best = next;
+    }
+    return result;
+}
+
 float VectorIndex::cosineSimilarity(
     const std::vector<float>& a,
     const std::vector<float>& b) {
@@ -144,21 +206,23 @@ float VectorIndex::cosineSimilarity(
         return 0.0f;
     }
     
-    float dot_product = 0.0f;
-    float norm_a = 0.0f;
-    float norm_b = 0.0f;
+    double dot_product = 0.0;
+    double norm_a = 0.0;
+    double norm_b = 0.0;
     
     for (size_t i = 0; i < a.size(); ++i) {
-        dot_product += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
+        dot_product += static_cast<double>(a[i]) * b[i];
+        norm_a += static_cast<double>(a[i]) * a[i];
+        norm_b += static_cast<double>(b[i]) * b[i];
     }
     
-    if (norm_a == 0.0f || norm_b == 0.0f) {
+    if (norm_a == 0.0 || norm_b == 0.0 || !std::isfinite(dot_product) ||
+        !std::isfinite(norm_a) || !std::isfinite(norm_b)) {
         return 0.0f;
     }
     
-    return dot_product / (std::sqrt(norm_a) * std::sqrt(norm_b));
+    return static_cast<float>(std::clamp(
+        dot_product / (std::sqrt(norm_a) * std::sqrt(norm_b)), -1.0, 1.0));
 }
 
 bool VectorIndex::saveToFile(const std::string& path) const {

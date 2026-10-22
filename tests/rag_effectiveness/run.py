@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import json
+import math
 import os
 from pathlib import Path
 import selectors
@@ -117,7 +118,57 @@ def ask_model(key, model, url, question, tools, timeout):
     return body["choices"][0]["message"], usage, elapsed
 
 
+def retrieval_metrics(suite, queries):
+    values, multi = [], []
+    for case in suite:
+        tools = queries[case["id"]]["tools"]
+        recall, complete = coverage(case, [tool["name"] for tool in tools])
+        values.append((recall, complete, len(tools)))
+        if case["kind"] == "multi":
+            multi.append(complete)
+    required = [complete for _, complete, _ in values if complete is not None]
+    return {"complete": mean([int(hit) for hit in required]),
+            "recall": mean([recall for recall, _, _ in values]),
+            "candidates": mean([count for _, _, count in values]),
+            "hits": sum(required), "required": len(required),
+            "multi_hits": sum(multi), "multi_required": len(multi)}
+
+
+def retrieval_misses(suite, queries, selection, k, fetch_k, threshold):
+    """标签只用于事后诊断；不传给检索器，也不影响候选选择。"""
+    misses = []
+    for case in suite:
+        response = queries[case["id"]]
+        selected = {tool["name"] for tool in response["tools"]}
+        ranking = {entry["name"]: entry for entry in response.get("ranking", [])}
+        for expected in case["expected_calls"]:
+            name = expected["name"]
+            if name in selected:
+                continue
+            entry = ranking.get(name)
+            if entry is None:
+                code, reason = "missing_vector", "没有有效的工具向量记录"
+            elif not entry["passes_threshold"] and not entry["in_pool"]:
+                code, reason = "threshold", f"相似度低于阈值{threshold}，未进入候选"
+            elif selection == "mmr" and not entry["in_pool"]:
+                code, reason = "pool", f"排名超过候选池上限{fetch_k}"
+            elif selection == "mmr":
+                code, reason = "mmr", f"进入候选池，但MMR未选入最终{k}个"
+            else:
+                code, reason = "top_k", f"通过阈值，但被最终{k}个的数量限制截断"
+            misses.append({"id": case["id"], "kind": case["kind"], "question": case["question"],
+                           "tool": name, "reason_code": code, "reason": reason,
+                           "rank": entry["rank"] if entry else None,
+                           "score": entry["score"] if entry else None})
+    return misses
+
+
 def evaluate(args, executable, server, plugins, directory, log_dir):
+    selection = getattr(args, "selection", "similarity")
+    retrieval_only = getattr(args, "retrieval_only", False)
+    selection_config = {"selection": selection,
+                        "mmr_fetch_k": getattr(args, "mmr_fetch_k", 30),
+                        "mmr_lambda": getattr(args, "mmr_lambda", 0.7)}
     suite = cases()
     if args.quick:
         chosen = {"weather-2", "tail-2", "filter-2", "summary-2", "gh-search-1", "slack-post-1",
@@ -126,6 +177,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
     data = {"status": "进行中", "evidence": "fixture" if getattr(args, "fixture", False) else "live", "config": {
         "model": args.model, "embedding_model": args.embedding_model,
         "threshold": args.threshold, "repeats": args.repeats, "quick": args.quick,
+        "retrieval_only": retrieval_only, **selection_config,
         "chat_url": args.chat_url, "embedding_url": args.embedding_url},
         "cases": suite, "stages": [], "records": [], "started_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     bridge = Bridge(executable, log_dir)
@@ -146,12 +198,12 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
             k = min(args.k, size)  # 工具数不超过 k 时，RAG 退化为全量
             data["catalogs"].append({"size": size, "tools": tools,
                                      "synthetic_names": [t["name"] for t in tools if t["name"] not in names]})
-            print(f"\n[3/4] {size}个工具：新增索引，RAG 固定 k={k}。", flush=True)
+            print(f"\n[3/4] {size}个工具：新增索引，{selection} 最终最多{k}个工具。", flush=True)
             indexed = bridge.request({"op": "index", "tools": tools,
                                       "embedding_model": args.embedding_model, "dimension": args.dimension,
                                       "embedding_url": args.embedding_url, "threshold": args.threshold,
                                       "index_path": str(Path(log_dir) / "tool_index.json")})
-            retrieval, warm = {}, {}
+            retrieval, warm, baseline = {}, {}, {}
             # 基线目录只有 4 个真实工具，跨应用题的预期工具不在其中；这类题跳过，
             # 不记成失败，也不参与该目录的检索指标。
             stage_names = {t["name"] for t in tools}
@@ -159,22 +211,22 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                            if {call["name"] for call in c["expected_calls"]} <= stage_names]
             bridge.request({"op": "reset_query_cache"})
             for i, case in enumerate(stage_suite):
-                first = bridge.request({"op": "retrieve", "query": case["question"], "k": k})
-                warm[case["id"]] = bridge.request({"op": "retrieve", "query": case["question"], "k": k})
+                request = {"op": "retrieve", "query": case["question"], "k": k, **selection_config}
+                first = bridge.request(dict(request, diagnostics=True))
+                warm[case["id"]] = bridge.request(request)
                 if k < size and (first["cache_misses"] != 1 or warm[case["id"]]["cache_misses"] != 0
                                  or warm[case["id"]]["cache_hits"] != 1):
                     raise RuntimeError("冷查询/重复查询缓存状态不符合预期")
                 retrieval[case["id"]] = first
+                if selection == "mmr":
+                    # 同一查询、同一索引、同一个已缓存向量，只改变候选选择方法。
+                    comparison = bridge.request(dict(request, selection="similarity", diagnostics=True))
+                    if comparison["cache_misses"] != 0:
+                        raise RuntimeError("普通排序对照不应增加Embedding请求")
+                    baseline[case["id"]] = comparison
                 if (i + 1) % 6 == 0:
                     print(f"  检索进度：{i+1}/{len(stage_suite)}", flush=True)
-            values = []
-            for case in stage_suite:
-                subset = retrieval[case["id"]]["tools"][:k]
-                recall, complete = coverage(case, [t["name"] for t in subset])
-                values.append((recall, complete, len(subset)))
-            metrics = {"complete": mean([int(v[1]) for v in values if v[1] is not None]),
-                       "recall": mean([v[0] for v in values]),
-                       "candidates": mean([v[2] for v in values])}
+            metrics = retrieval_metrics(stage_suite, retrieval)
             stage = {"size": size, "k": k, "index": indexed, "retrieval": metrics,
                      "cases": len(stage_suite), "test_cases": len(stage_suite),
                      "skipped": len(suite) - len(stage_suite),
@@ -183,6 +235,18 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                      "query_misses": sum(retrieval[c["id"]]["cache_misses"] for c in stage_suite),
                      "query_hits": sum(retrieval[c["id"]]["cache_hits"] for c in stage_suite),
                      "queries": retrieval}
+            stage["misses"] = retrieval_misses(stage_suite, retrieval, selection, k,
+                                                selection_config["mmr_fetch_k"], args.threshold)
+            if baseline:
+                stage["baseline_retrieval"] = retrieval_metrics(stage_suite, baseline)
+                stage["baseline_queries"] = baseline
+                stage["baseline_misses"] = retrieval_misses(stage_suite, baseline, "similarity", k,
+                                                             selection_config["mmr_fetch_k"], args.threshold)
+            if retrieval_only:
+                data["stages"].append(stage)
+                data["status"] = "完成：仅检索，未调用对话模型"
+                report(data, directory)
+                continue
             print(f"  本目录 {len(stage_suite)} 题参与（跳过 {stage['skipped']} 题：所需工具不在该目录内）；"
                   f"[4/4] {len(stage_suite)}题 × 两组 × {args.repeats}次真实模型对照。", flush=True)
             records = []
@@ -238,6 +302,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--self-test", action="store_true", help="离线自检，不调用真实API，不产生效果结论")
     mode.add_argument("--live", action="store_true", help="调用真实Embedding/模型API进行对照")
+    mode.add_argument("--retrieval-only", action="store_true", help="只调用真实Embedding，比较工具召回，不调用对话模型")
     parser.add_argument("--quick", action="store_true", help="小规模在线试跑：12个测试问题，基线+50工具")
     parser.add_argument("--model", default="qwen-plus")
     parser.add_argument("--chat-key-env", default="DASHSCOPE_API_KEY",
@@ -248,6 +313,10 @@ def main():
     parser.add_argument("--embedding-url", default=DEFAULT_EMBEDDING)
     parser.add_argument("--threshold", type=float, default=0.3)
     parser.add_argument("--k", type=int, default=10, help="RAG 候选数；工具数不超过 k 时退化为全量")
+    parser.add_argument("--selection", choices=("similarity", "mmr"), default="similarity",
+                        help="候选选择方法；MMR报告同时给出相同k的普通排序召回")
+    parser.add_argument("--mmr-fetch-k", type=int, default=30, help="MMR候选池上限，必须不小于k")
+    parser.add_argument("--mmr-lambda", type=float, default=0.7, help="MMR相关性权重[0,1]，1等价于普通排序")
     parser.add_argument("--sizes", type=lambda s: [int(v) for v in s.split(",")], default=[50, 100, 300])
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=90)
@@ -261,8 +330,15 @@ def main():
         parser.error("次数、超时、线程数、维度必须为正；阈值为0..1")
     if args.k < 1 or any(n < 1 for n in args.sizes):
         parser.error("k 和目录规模必须为正")
+    if args.mmr_fetch_k < 1 or not math.isfinite(args.mmr_lambda) or not 0 <= args.mmr_lambda <= 1:
+        parser.error("MMR候选池必须为正，权重必须是[0,1]内的有限数")
+    if args.selection == "mmr" and args.mmr_fetch_k < args.k:
+        parser.error("MMR候选池不能小于最终k")
     if args.live and not chat_key(os.environ, args.chat_key_env):
         print(f"[未运行] 请先设置{args.chat_key_env}（对话模型密钥）；缺少密钥不是测试通过。", file=sys.stderr)
+        return 77
+    if args.retrieval_only and not os.environ.get("DASHSCOPE_API_KEY", "").strip():
+        print("[未运行] 请设置DASHSCOPE_API_KEY（Embedding密钥）；缺少密钥不是通过。", file=sys.stderr)
         return 77
     identifier = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     directory = args.output.resolve() / (("self-test-" if args.self_test else "live-") + identifier)

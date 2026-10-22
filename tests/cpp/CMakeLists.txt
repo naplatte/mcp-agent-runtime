@@ -35,3 +35,9 @@ add_dependencies(test_mcp_timeouts mcp_server)
 add_test(NAME mcp_timeouts COMMAND test_mcp_timeouts
     $<TARGET_FILE:mcp_server> ${CMAKE_BINARY_DIR}/mcp_server/plugins)
 set_tests_properties(mcp_timeouts PROPERTIES TIMEOUT 30)
+
+add_executable(test_rag_mmr test_rag_mmr.cpp)
+target_link_libraries(test_rag_mmr PRIVATE mcp_client)
+target_compile_features(test_rag_mmr PRIVATE cxx_std_20)
+add_test(NAME rag_mmr COMMAND test_rag_mmr)
+set_tests_properties(rag_mmr PROPERTIES TIMEOUT 10)

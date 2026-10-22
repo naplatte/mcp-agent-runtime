@@ -110,3 +110,24 @@ python3 tests/rag_effectiveness/run.py --live --repeats 1 --threshold 0.3 --k 10
 - `--jobs`：构建并行数，默认2。
 
 目录规模不能小于真实工具数（4），也不能超过工具池大小（308）。
+
+## 7. MMR 与漏工具原因
+
+先只调用 Embedding，比较同一批查询在普通排序和 MMR 下有没有把工具给齐：
+
+```bash
+python3 tests/rag_effectiveness/run.py --retrieval-only --selection mmr --k 10 --mmr-fetch-k 30 --mmr-lambda 0.7
+```
+
+默认仍为 `--selection similarity`。MMR 复用一次问题向量化，从最多30个候选中逐次选出最多10个；
+不增加拆分模型请求。权重1等价于普通排序，0.7是实验起点，不代表已验证的最佳值。
+
+报告新增普通排序与 MMR 的给齐题数对照、多工具题给齐数，以及逐题漏工具原因表：
+低于阈值、在候选池之外、进入候选池但被MMR排除，或普通排序被K截断。
+表中展示原始排名和相似度；按遗漏工具次数统计原因，按题统计完整命中率。
+
+仅检索模式不需要对话模型密钥，不生成对话正确率或输入token结论。要测最终调用效果，
+使用原来的 `--live` 命令并加 `--selection mmr`，其余模型和接口参数保持不变。
+普通排序与 MMR 的检索对照复用查询向量，不额外消耗 Embedding 请求。
+
+完整说明、C++配置与边界见 [MMR工具筛选说明](../../docs/rag-mmr.md)。

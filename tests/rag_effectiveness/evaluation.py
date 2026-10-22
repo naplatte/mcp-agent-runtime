@@ -140,6 +140,11 @@ def report(data, directory):
              "## 1. 题目与目录", "",
              f"{len(data['cases'])} 题：{kinds['single']} 单工具、{kinds['multi']} 多工具、"
              f"{kinds['no_tool']} 无需工具。"]
+    selection = data["config"].get("selection", "similarity")
+    lines.append(f"筛选方式：{'MMR' if selection == 'mmr' else '普通相似度排序'}。")
+    if selection == "mmr":
+        lines.append(f"候选池上限 {data['config']['mmr_fetch_k']}，相关性权重 {data['config']['mmr_lambda']}；"
+                     "只复用现有向量，不增加拆分模型或查询Embedding请求。")
 
     sizes = [str(s["size"]) for s in data["stages"]]
     skipped = [f"{s['size']} 工具目录：{s.get('cases', 0)} 题参与" +
@@ -152,6 +157,56 @@ def report(data, directory):
         metric = stage["retrieval"]
         lines.append(f"| {stage['size']} | {stage['k']} | {percent(metric.get('complete'))} "
                      f"| {percent(metric.get('recall'))} |")
+
+    if selection == "mmr":
+        lines += ["", "### 相同最终工具数量：普通排序与 MMR", "",
+                  "给齐题数只统计需要工具的题；多工具题必须把所需工具全部给齐。", "",
+                  "| 工具总数 | 最终最多 | 普通排序给齐 | MMR给齐 | 多工具题：普通 → MMR | 平均候选：普通 → MMR |",
+                  "|---:|---:|---:|---:|---:|---:|"]
+        for stage in data["stages"]:
+            base, mmr = stage["baseline_retrieval"], stage["retrieval"]
+            lines.append(f"| {stage['size']} | {stage['k']} | {base['hits']}/{base['required']} "
+                         f"| {mmr['hits']}/{mmr['required']} "
+                         f"| {base['multi_hits']}/{base['multi_required']} → {mmr['multi_hits']}/{mmr['multi_required']} "
+                         f"| {base['candidates']:.1f} → {mmr['candidates']:.1f} |")
+        lines.append("\n上述对照使用相同问题、目录和查询向量，只改变最终候选的选择方法。")
+
+    lines += ["", "### 正确工具为什么没进最终候选", "",
+              "以下按遗漏工具次数统计：一道题缺两个工具会计两次。分数和排名来自原问题与工具的余弦相似度。", "",
+              "| 工具总数 | 低于阈值 | 候选池之外 | MMR未选入 | 普通排序被数量截断 | 无有效向量 |",
+              "|---:|---:|---:|---:|---:|---:|"]
+    for stage in data["stages"]:
+        counts = Counter(miss["reason_code"] for miss in stage.get("misses", []))
+        lines.append(f"| {stage['size']} | {counts['threshold']} | {counts['pool']} | {counts['mmr']} "
+                     f"| {counts['top_k']} | {counts['missing_vector']} |")
+    lines += ["", "| 工具总数 | 问题编号 | 缺少的正确工具 | 相似度 | 原始排名 | 未选中的阶段原因 |",
+              "|---:|---|---|---:|---:|---|"]
+    any_misses = False
+    for stage in data["stages"]:
+        for miss in stage.get("misses", []):
+            any_misses = True
+            score_text = "无" if miss["score"] is None else f"{miss['score']:.4f}"
+            question = miss["question"].replace("|", "\\|").replace("\n", " ")
+            lines.append(f"| {stage['size']} | {miss['id']}<br>{question} | {miss['tool']} | {score_text} "
+                         f"| {miss['rank'] if miss['rank'] is not None else '无'} | {miss['reason']} |")
+    if not any_misses:
+        lines.append("| — | 本次没有遗漏必需工具 | — | — | — | — |")
+    lines += ["", "“低于阈值”可能同时排名靠后，表中优先标记阈值原因；"
+              "这些是筛选阶段的直接原因，不证明Embedding为什么把工具排低。", ""]
+
+    if data["config"].get("retrieval_only"):
+        lines += ["", "## 3. 检索耗时", "",
+                  "| 工具总数 | 首次查询平均 | 缓存命中平均 |", "|---:|---:|---:|"]
+        for stage in data["stages"]:
+            lines.append(f"| {stage['size']} | {stage['retrieval_first_ms']:.2f} ms "
+                         f"| {stage['retrieval_warm_ms']:.2f} ms |")
+        lines += ["", "未调用对话模型：最终调用正确率和对话输入token均未测量。",
+                  "MMR只能重选候选池内的工具；被阈值过滤或排在候选池外的工具无法补回。",
+                  "工具目录含模拟定义，题目为有限样本，召回结果不等于生产任务成功率。", ""]
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
+        return
 
     lines += ["", "## 3. 全量工具 vs RAG 筛选", "",
               "命中题正确率＝候选里已含全部目标工具的那些题上，模型自己的正确率；用它区分“召回没给到”和“给了但选错”。",
@@ -222,10 +277,16 @@ def report(data, directory):
 def console(data, directory):
     print(f"\n========== RAG 工具筛选对照 ==========\n状态：{data['status']}")
     for stage in data["stages"]:
-        base, rag = stage["summary"]["all"], stage["summary"]["rag"]
         metric = stage["retrieval"]
         print(f"\n[{stage['size']} 个工具，k={stage['k']}，{stage.get('cases', 0)} 题]")
         print(f"  检索完整命中率 {percent(metric.get('complete'))}，平均召回 {percent(metric.get('recall'))}")
+        if "baseline_retrieval" in stage:
+            base_metric = stage["baseline_retrieval"]
+            print(f"  工具给齐：普通排序 {base_metric['hits']}/{base_metric['required']} → "
+                  f"MMR {metric['hits']}/{metric['required']}")
+        if data["config"].get("retrieval_only"):
+            continue
+        base, rag = stage["summary"]["all"], stage["summary"]["rag"]
         print(f"  全量：调用正确率 {percent(base['accuracy'])}，token {number(base['prompt_tokens'])}")
         print(f"  RAG ：调用正确率 {percent(rag['accuracy'])}，命中题正确率 {percent(rag.get('accuracy_on_hit'))}，"
               f"token {number(rag['prompt_tokens'])}")

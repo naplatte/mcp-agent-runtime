@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from dataset import cases, catalogs, definition, text
 from evaluation import aggregate, coverage, score
-from run import Bridge, evaluate
+from run import Bridge, evaluate, retrieval_misses
 import run
 
 
@@ -81,6 +81,24 @@ def local_api():
 
 
 class ScoringTests(unittest.TestCase):
+    def test_miss_diagnostics_distinguish_filter_pool_and_selection(self):
+        case = {"id": "fixture", "kind": "single", "question": "fixture",
+                "expected_calls": [{"name": "target", "arguments": {}}]}
+        entry = {"name": "target", "rank": 12, "score": 0.2,
+                 "passes_threshold": False, "in_pool": False}
+        response = {"tools": [], "ranking": [entry]}
+        def reason(selection="mmr"):
+            return retrieval_misses([case], {"fixture": response}, selection, 10, 30, 0.3)[0]
+        self.assertEqual(reason()["reason_code"], "threshold")
+        self.assertEqual(reason()["rank"], 12)
+        entry.update(rank=31, score=0.6, passes_threshold=True)
+        self.assertEqual(reason()["reason_code"], "pool")
+        entry.update(rank=12, in_pool=True)
+        self.assertEqual(reason()["reason_code"], "mmr")
+        self.assertEqual(reason("similarity")["reason_code"], "top_k")
+        response["tools"] = [{"name": "target"}]
+        self.assertEqual(retrieval_misses([case], {"fixture": response}, "mmr", 10, 30, 0.3), [])
+
     def test_cases_and_catalogs_have_distinct_capabilities(self):
         suite = cases()
         self.assertEqual(len(suite), 80)
@@ -131,6 +149,61 @@ class ScoringTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("RAG_EVAL_BACKEND"), "Build the C++ backend using run.py --self-test")
 class BackendTests(unittest.TestCase):
+    def test_mmr_reuses_query_embedding_and_exposes_unfiltered_ranking(self):
+        with tempfile.TemporaryDirectory() as directory, local_api() as (api, url):
+            bridge = Bridge(os.environ["RAG_EVAL_BACKEND"], directory)
+            try:
+                tools = [definition("get_weather", "weather", {}, []),
+                         definition("tail_log", "log", {}, []),
+                         definition("other", "other", {}, [])]
+                bridge.request({"op": "index", "tools": tools, "fixture_key": "offline-fixture",
+                                "dimension": 8, "threshold": 0.3, "embedding_url": url + "/embedding",
+                                "index_path": str(Path(directory) / "index.json")})
+                before = len(api.requests)
+                query = {"op": "retrieve", "query": "北京天气", "k": 2, "selection": "mmr",
+                         "mmr_fetch_k": 3, "mmr_lambda": 0.7, "diagnostics": True}
+                mmr = bridge.request(query)
+                self.assertEqual(len(api.requests), before + 1)
+                self.assertEqual(mmr["cache_misses"], 1)
+                self.assertEqual(len(mmr["ranking"]), 3)
+                target = next(r for r in mmr["ranking"] if r["name"] == "tail_log")
+                self.assertFalse(target["passes_threshold"])
+                self.assertFalse(target["in_pool"])
+                self.assertFalse(target["selected"])
+                ordinary = bridge.request(dict(query, selection="similarity"))
+                self.assertEqual(ordinary["cache_misses"], 0)
+                self.assertEqual(len(api.requests), before + 1)
+                self.assertEqual(mmr["ranking"], ordinary["ranking"])
+                with self.assertRaisesRegex(RuntimeError, "fetch_k"):
+                    bridge.request(dict(query, mmr_fetch_k=1))
+                self.assertEqual(len(api.requests), before + 1)
+            finally:
+                bridge.close()
+
+    def test_retrieval_only_mmr_report_never_calls_chat(self):
+        with tempfile.TemporaryDirectory() as directory, local_api() as (api, url), \
+                patch.dict(os.environ, {"DASHSCOPE_API_KEY": "offline-fixture"}):
+            args = types.SimpleNamespace(quick=True, repeats=1, model="fixture", embedding_model="fixture",
+                                         dimension=8, threshold=0.3, sizes=[50], k=10,
+                                         selection="mmr", mmr_fetch_k=30, mmr_lambda=0.7,
+                                         retrieval_only=True, fixture=True,
+                                         chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = evaluate(args, Path(os.environ["RAG_EVAL_BACKEND"]), Path(os.environ["RAG_EVAL_SERVER"]),
+                                Path(os.environ["RAG_EVAL_PLUGINS"]), Path(directory), Path(directory) / "logs")
+            self.assertEqual(code, 0)
+            self.assertFalse(any(path == "/chat" for path, _ in api.requests))
+            data = run.LAST_RUN
+            self.assertEqual(data["records"], [])
+            stage = data["stages"][0]
+            self.assertEqual(stage["query_misses"], len(data["cases"]))
+            self.assertIn("baseline_retrieval", stage)
+            text_report = (Path(directory) / "report.md").read_text(encoding="utf-8")
+            self.assertIn("普通排序与 MMR", text_report)
+            self.assertIn("正确工具为什么没进最终候选", text_report)
+            self.assertIn("相似度低于阈值", text_report)
+            self.assertIn("最终调用正确率和对话输入token均未测量", text_report)
+
     def test_actual_cpp_discovery_retrieval_cache_and_error_boundary(self):
         with tempfile.TemporaryDirectory() as directory, local_api() as (api, url):
             bridge = Bridge(os.environ["RAG_EVAL_BACKEND"], directory)
@@ -175,9 +248,16 @@ class BackendTests(unittest.TestCase):
                     bridge.close()
 
     def test_complete_driver_reports_are_explicitly_fixture_only(self):
+        self.check_complete_driver("similarity")
+
+    def test_complete_mmr_driver_reports_are_explicitly_fixture_only(self):
+        self.check_complete_driver("mmr")
+
+    def check_complete_driver(self, selection):
         with tempfile.TemporaryDirectory() as directory, local_api() as (_, url), patch.dict(os.environ, {"DASHSCOPE_API_KEY": "offline-fixture"}):
             args = types.SimpleNamespace(quick=False, repeats=2, model="fixture", embedding_model="fixture",
                                          dimension=8, threshold=0.3, sizes=[50, 100, 300], k=10,
+                                         selection=selection, mmr_fetch_k=30, mmr_lambda=0.7,
                                          chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3, fixture=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 code = evaluate(args, Path(os.environ["RAG_EVAL_BACKEND"]), Path(os.environ["RAG_EVAL_SERVER"]),

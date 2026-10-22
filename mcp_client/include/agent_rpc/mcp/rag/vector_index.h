@@ -35,7 +35,13 @@ struct IndexedTool {
  */
 struct SearchResult {
     IndexedTool tool;                 ///< 工具信息
-    float similarity;                 ///< 相似度分数 [0, 1]
+    float similarity;                 ///< 原始余弦相似度 [-1, 1]，不是 MMR 分数
+};
+
+struct MMRConfig {
+    bool enabled = false;            ///< 默认保留普通相似度排序
+    int fetch_k = 30;                ///< MMR 候选池上限，必须不小于最终 top_k
+    float lambda = 0.7f;             ///< 相关性权重 [0, 1]，1 等价于普通排序
 };
 
 /**
@@ -111,6 +117,16 @@ public:
     std::vector<SearchResult> search(
         const std::vector<float>& query_embedding,
         int top_k,
+        float threshold = 0.0f) const;
+
+    /**
+     * @brief 从相似度候选池中按 MMR 选择工具，返回顺序为选择顺序。
+     * 阈值只作用于原始余弦分数；复用已有工具向量，不请求 Embedding。
+     */
+    std::vector<SearchResult> searchMMR(
+        const std::vector<float>& query_embedding,
+        int top_k,
+        const MMRConfig& config,
         float threshold = 0.0f) const;
     
     /**

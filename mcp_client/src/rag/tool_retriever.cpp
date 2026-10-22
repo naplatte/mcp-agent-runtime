@@ -11,6 +11,8 @@
 
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <cmath>
+#include <stdexcept>
 
 using json = nlohmann::json;
 
@@ -35,6 +37,11 @@ bool ToolRetriever::initialize() {
     }
     
     try {
+        if (config_.top_k <= 0 || !std::isfinite(config_.mmr.lambda) ||
+            config_.mmr.lambda < 0.0f || config_.mmr.lambda > 1.0f ||
+            config_.mmr.fetch_k <= 0 ||
+            (config_.mmr.enabled && config_.mmr.fetch_k < config_.top_k))
+            throw std::invalid_argument("Invalid retrieval/MMR configuration");
         // 创建 Embedding 服务
         embedding_service_ = std::make_unique<EmbeddingService>(config_.embedding_config);
         
@@ -170,6 +177,13 @@ std::vector<RetrievedTool> ToolRetriever::retrieve(const std::string& query) {
 }
 
 std::vector<RetrievedTool> ToolRetriever::retrieve(const std::string& query, int top_k) {
+    return retrieve(query, top_k, config_.mmr);
+}
+
+std::vector<RetrievedTool> ToolRetriever::retrieve(
+    const std::string& query, int top_k, const MMRConfig& mmr,
+    std::vector<RetrievedTool>* ranking) {
+    if (ranking) ranking->clear();
     if (!initialized_) {
         LOG_ERROR("ToolRetriever not initialized");
         return {};
@@ -181,14 +195,26 @@ std::vector<RetrievedTool> ToolRetriever::retrieve(const std::string& query, int
     }
     
     try {
+        if (top_k <= 0 || (mmr.enabled && (mmr.fetch_k < top_k ||
+            !std::isfinite(mmr.lambda) || mmr.lambda < 0.0f || mmr.lambda > 1.0f)))
+            throw std::invalid_argument("Invalid top_k or MMR configuration");
         // 获取查询向量
         std::vector<float> query_embedding = getEmbedding(query);
+
+        // 仅评测诊断启用：保留未按阈值/K截断的排名，复用同一个查询向量。
+        if (ranking) {
+            auto all = index_->search(query_embedding, static_cast<int>(index_->size()), -1.0f);
+            ranking->reserve(all.size());
+            for (const auto& item : all) {
+                ranking->push_back({item.tool.name, item.tool.description,
+                                    item.tool.input_schema, item.similarity});
+            }
+        }
         
         // 搜索
-        auto search_results = index_->search(
-            query_embedding, 
-            top_k, 
-            config_.similarity_threshold);
+        auto search_results = mmr.enabled
+            ? index_->searchMMR(query_embedding, top_k, mmr, config_.similarity_threshold)
+            : index_->search(query_embedding, top_k, config_.similarity_threshold);
         
         // 转换结果
         std::vector<RetrievedTool> results;

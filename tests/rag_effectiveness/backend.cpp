@@ -120,15 +120,27 @@ int main() {
                 const int requested_k = input.at("k");
                 if (requested_k <= 0)
                     throw std::runtime_error("k must be positive");
+                const auto selection = input.value("selection", "similarity");
+                if (selection != "similarity" && selection != "mmr")
+                    throw std::runtime_error("Unknown selection strategy");
+                rag::MMRConfig mmr;
+                mmr.enabled = selection == "mmr";
+                mmr.fetch_k = input.value("mmr_fetch_k", 30);
+                mmr.lambda = input.value("mmr_lambda", 0.7f);
+                if (mmr.enabled && (mmr.fetch_k < requested_k ||
+                    !std::isfinite(mmr.lambda) || mmr.lambda < 0.0f || mmr.lambda > 1.0f))
+                    throw std::runtime_error("MMR requires fetch_k >= k and lambda within [0, 1]");
                 // k 不小于目录大小时退化为全量，用于观察「RAG 退化为全量」这一档。
                 auto before = retriever->getCacheStats();
                 auto start = Clock::now();
                 std::vector<rag::RetrievedTool> selected;
+                std::vector<rag::RetrievedTool> ranking;
                 if (requested_k >= static_cast<int>(indexed.size())) {
                     // k 不小于目录大小：退化为全量，返回全部工具，不再受相似度阈值过滤。
                     selected = retriever->getAllTools();
                 } else {
-                    selected = retriever->retrieve(input.at("query"), requested_k);
+                    selected = retriever->retrieve(input.at("query"), requested_k, mmr,
+                                                  input.value("diagnostics", false) ? &ranking : nullptr);
                 }
                 const double duration = elapsed(start);
                 auto after = retriever->getCacheStats();
@@ -142,9 +154,30 @@ int main() {
                     scores.push_back({{"name", tool.name}, {"score", tool.relevance_score}});
                 }
                 output = {{"tools", json::parse(MCPAgentIntegration::toFunctionCallingFormat(definitions))},
+                          {"selection", selection},
                           {"scores", scores}, {"retrieval_ms", duration},
                           {"cache_hits", after.hits - before.hits},
                           {"cache_misses", after.misses - before.misses}};
+                if (input.value("diagnostics", false)) {
+                    const auto threshold = retriever->getConfig().similarity_threshold;
+                    std::set<std::string> pool, selected_names;
+                    for (const auto& tool : selected) selected_names.insert(tool.name);
+                    for (const auto& tool : ranking) {
+                        if (tool.relevance_score >= threshold &&
+                            (!mmr.enabled || pool.size() < static_cast<size_t>(mmr.fetch_k)))
+                            pool.insert(tool.name);
+                    }
+                    if (pool.empty() && !ranking.empty()) pool.insert(ranking.front().name);
+                    output["ranking"] = json::array();
+                    for (size_t i = 0; i < ranking.size(); ++i) {
+                        const auto& tool = ranking[i];
+                        output["ranking"].push_back({{"name", tool.name}, {"rank", i + 1},
+                            {"score", tool.relevance_score},
+                            {"passes_threshold", tool.relevance_score >= threshold},
+                            {"in_pool", pool.count(tool.name) != 0},
+                            {"selected", selected_names.count(tool.name) != 0}});
+                    }
+                }
             } else if (op == "quit") {
                 protocol << json({{"ok", true}}).dump() << std::endl;
                 break;
