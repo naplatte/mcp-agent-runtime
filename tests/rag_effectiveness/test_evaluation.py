@@ -89,11 +89,13 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual((kinds["single"], kinds["multi"], kinds["no_tool"]), (40, 24, 16))
         self.assertTrue(any(c["kind"] == "multi" and c["split"] == "dev" for c in suite))
         base = [definition(name, name, {}, []) for name in ("get_weather", "tail_log", "analyze_log", "summarize_errors")]
-        groups = catalogs(base, [50, 100])
-        self.assertEqual([len(g) for g in groups], [4, 50, 100])
+        groups = catalogs(base, [50, 100, 300])
+        self.assertEqual([len(g) for g in groups], [4, 50, 100, 300])
+        self.assertEqual(groups[1][:4], groups[0])
         self.assertEqual(groups[2][:50], groups[1])
-        self.assertEqual(len({t["name"] for t in groups[-1]}), 100)
-        self.assertEqual(len({t["description"] for t in groups[-1]}), 100)
+        self.assertEqual(groups[3][:100], groups[2])
+        self.assertEqual(len({t["name"] for t in groups[-1]}), 300)
+        self.assertEqual(len({t["description"] for t in groups[-1]}), 300)
 
     def test_tool_and_argument_failures_are_scored_separately(self):
         tool = definition("get_weather", "weather", {"city": text("City"), "latitude": text("Latitude"),
@@ -175,7 +177,7 @@ class BackendTests(unittest.TestCase):
     def test_complete_driver_reports_are_explicitly_fixture_only(self):
         with tempfile.TemporaryDirectory() as directory, local_api() as (_, url), patch.dict(os.environ, {"DASHSCOPE_API_KEY": "offline-fixture"}):
             args = types.SimpleNamespace(quick=False, repeats=2, model="fixture", embedding_model="fixture",
-                                         dimension=8, threshold=0.3, sizes=[50, 100], k_values=[1, 3, 5],
+                                         dimension=8, threshold=0.3, sizes=[50, 100, 300], k_values=[1, 3, 5],
                                          chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3, fixture=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 code = evaluate(args, Path(os.environ["RAG_EVAL_BACKEND"]), Path(os.environ["RAG_EVAL_SERVER"]),
@@ -183,7 +185,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = run.LAST_RUN
             self.assertEqual(data["evidence"], "fixture")
-            self.assertEqual([s["size"] for s in data["stages"]], [4, 50, 100])
+            self.assertEqual([s["size"] for s in data["stages"]], [4, 50, 100, 300])
             expected = sum(s["test_cases"] * 2 * args.repeats for s in data["stages"])
             self.assertEqual(len(data["records"]), expected)
             self.assertTrue(all(s["query_misses"] == s["test_cases"] and s["query_hits"] == 0

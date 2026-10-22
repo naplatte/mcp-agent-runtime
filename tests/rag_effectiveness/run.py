@@ -256,7 +256,7 @@ def main():
     parser.add_argument("--embedding-url", default=DEFAULT_EMBEDDING)
     parser.add_argument("--threshold", type=float, default=0.3)
     parser.add_argument("--k-values", type=lambda s: [int(v) for v in s.split(",")], default=[1, 3, 5])
-    parser.add_argument("--sizes", type=lambda s: [int(v) for v in s.split(",")], default=[50, 100])
+    parser.add_argument("--sizes", type=lambda s: [int(v) for v in s.split(",")], default=[50, 100, 300])
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--jobs", type=int, default=2)
