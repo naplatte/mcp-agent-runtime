@@ -26,6 +26,11 @@ DEFAULT_EMBEDDING = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/t
 LAST_RUN = {}
 
 
+def chat_key(environ, name="DASHSCOPE_API_KEY"):
+    """对话模型密钥：优先读指定环境变量，未设置时退回 DASHSCOPE_API_KEY。"""
+    return (environ.get(name, "") or environ.get("DASHSCOPE_API_KEY", "")).strip()
+
+
 class Bridge:
     def __init__(self, executable, log_dir):
         Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -214,8 +219,9 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                                   "warm_retrieval_ms": 0.0 if arm == "all" else warm[case["id"]]["retrieval_ms"],
                                   "query_cache_misses": 0 if arm == "all" or repeat > 1 else timing["cache_misses"]}
                         try:
-                            message, usage, model_ms = ask_model(os.environ["DASHSCOPE_API_KEY"], args.model,
-                                                                args.chat_url, case["question"], supplied, args.timeout)
+                            message, usage, model_ms = ask_model(
+                                chat_key(os.environ, getattr(args, "chat_key_env", "DASHSCOPE_API_KEY")),
+                                args.model, args.chat_url, case["question"], supplied, args.timeout)
                             record.update(score(message, case, supplied))
                             record.update({"prompt_tokens": usage["prompt_tokens"], "completion_tokens": usage["completion_tokens"],
                                            "usage": usage, "model_ms": model_ms, "response": message})
@@ -250,6 +256,8 @@ def main():
     mode.add_argument("--live", action="store_true", help="调用真实Embedding/模型API进行对照")
     parser.add_argument("--quick", action="store_true", help="小规模在线试跑：12个测试问题，基线+50工具")
     parser.add_argument("--model", default="qwen-plus")
+    parser.add_argument("--chat-key-env", default="DASHSCOPE_API_KEY",
+                        help="对话模型密钥所在的环境变量名；Embedding 仍用 DASHSCOPE_API_KEY")
     parser.add_argument("--embedding-model", default="text-embedding-v2")
     parser.add_argument("--dimension", type=int, default=1536)
     parser.add_argument("--chat-url", default=DEFAULT_CHAT)
@@ -269,8 +277,8 @@ def main():
         parser.error("次数、超时、线程数、维度必须为正；阈值为0..1")
     if not args.k_values or any(k < 1 for k in args.k_values) or any(n < 1 for n in args.sizes):
         parser.error("k和目录规模必须为正")
-    if args.live and not os.environ.get("DASHSCOPE_API_KEY", "").strip():
-        print("[未运行] 请先设置DASHSCOPE_API_KEY；缺少密钥不是测试通过。", file=sys.stderr)
+    if args.live and not chat_key(os.environ, args.chat_key_env):
+        print(f"[未运行] 请先设置{args.chat_key_env}（对话模型密钥）；缺少密钥不是测试通过。", file=sys.stderr)
         return 77
     identifier = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     directory = args.output.resolve() / (("self-test-" if args.self_test else "live-") + identifier)
