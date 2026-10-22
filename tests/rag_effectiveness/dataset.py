@@ -194,7 +194,7 @@ def catalogs(real_tools, sizes):
     extra = [t for t in synthetic_tools() if t["name"] not in names]
     pool = real_tools + extra
     result = []
-    for size in sorted(set([len(real_tools)] + list(sizes))):
+    for size in sorted(set(sizes)):
         if size < len(real_tools) or size > len(pool):
             raise ValueError(f"目录规模 {size} 超出可用范围 {len(real_tools)}..{len(pool)}")
         result.append(pool[:size])

@@ -88,10 +88,9 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual((kinds["single"], kinds["multi"], kinds["no_tool"]), (40, 24, 16))
         base = [definition(name, name, {}, []) for name in ("get_weather", "tail_log", "analyze_log", "summarize_errors")]
         groups = catalogs(base, [50, 100, 300])
-        self.assertEqual([len(g) for g in groups], [4, 50, 100, 300])
-        self.assertEqual(groups[1][:4], groups[0])
-        self.assertEqual(groups[2][:50], groups[1])
-        self.assertEqual(groups[3][:100], groups[2])
+        self.assertEqual([len(g) for g in groups], [50, 100, 300])
+        self.assertEqual(groups[1][:50], groups[0])
+        self.assertEqual(groups[2][:100], groups[1])
         self.assertEqual(len({t["name"] for t in groups[-1]}), 300)
         self.assertEqual(len({t["description"] for t in groups[-1]}), 300)
 
@@ -186,7 +185,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = run.LAST_RUN
             self.assertEqual(data["evidence"], "fixture")
-            self.assertEqual([s["size"] for s in data["stages"]], [4, 50, 100, 300])
+            self.assertEqual([s["size"] for s in data["stages"]], [50, 100, 300])
             expected = sum(s["test_cases"] * 2 * args.repeats for s in data["stages"])
             self.assertEqual(len(data["records"]), expected)
             for stage in data["stages"]:
