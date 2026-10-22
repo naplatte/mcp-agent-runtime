@@ -278,7 +278,7 @@ class RAGToolIndex:
             self.dimension = len(self.vectors[0])
         return len(self.vectors)
 
-    def retrieve(self, query, top_k=3, threshold=0.3):
+    def retrieve(self, query, top_k=3):
         """
         根据查询检索相关工具。
         返回 [(tool, score), ...] 按相关性降序排列。
@@ -287,8 +287,7 @@ class RAGToolIndex:
         scored = []
         for tool, vec in zip(self.tools, self.vectors):
             score = cosine_similarity(query_vec, vec)
-            if score >= threshold:
-                scored.append((tool, score))
+            scored.append((tool, score))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
 
@@ -428,9 +427,9 @@ def run_tests(api_key, embedding_key, llm_model):
             tools_for_llm = all_openai_tools  # 默认: 全部工具
 
             if rag_ok:
-                retrieved = rag_index.retrieve(query, top_k=3, threshold=0.2)
+                retrieved = rag_index.retrieve(query, top_k=3)
                 if retrieved:
-                    log_info(f"RAG 检索结果 (相似度 >= 0.2):")
+                    log_info("RAG 检索结果 (按相似度选前3个):")
                     for t, score in retrieved:
                         log_info(f"  {score:.4f}  {t['name']}: {t.get('description', '')[:50]}")
                     # 只把 RAG 筛选出的工具发给 LLM
@@ -440,7 +439,7 @@ def run_tests(api_key, embedding_key, llm_model):
                     log_info(f"发送给 LLM 的工具: {[t['function']['name'] for t in tools_for_llm]} "
                              f"(RAG 筛选 {len(tools_for_llm)}/{len(all_openai_tools)})")
                 else:
-                    log_info(f"RAG 未找到相关工具 (阈值 0.2), 使用全部 {len(all_openai_tools)} 个工具")
+                    log_info(f"RAG 未返回工具, 使用全部 {len(all_openai_tools)} 个工具")
 
             # ---- 4b. 调用 LLM，让它选择工具 ----
             messages = [

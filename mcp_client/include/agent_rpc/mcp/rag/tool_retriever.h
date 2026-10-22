@@ -29,7 +29,6 @@ struct RetrieverConfig {
     EmbeddingConfig embedding_config;     ///< Embedding 服务配置
     CacheConfig cache_config;             ///< 缓存配置
     int top_k = 5;                        ///< 返回工具数量
-    float similarity_threshold = 0.3f;    ///< 相似度阈值
     bool enable_validation = false;       ///< 是否启用验证
     int validation_timeout_ms = 5000;     ///< 验证超时
     std::string index_path;               ///< 索引文件路径

@@ -96,8 +96,7 @@ std::vector<IndexedTool> VectorIndex::getAllTools() const {
 
 std::vector<SearchResult> VectorIndex::search(
     const std::vector<float>& query_embedding,
-    int top_k,
-    float threshold) const {
+    int top_k) const {
     
     std::lock_guard<std::mutex> lock(mutex_);
     
@@ -131,39 +130,25 @@ std::vector<SearchResult> VectorIndex::search(
             return a.tool.name < b.tool.name;
         });
     
-    // 应用阈值过滤
-    std::vector<SearchResult> filtered_results;
-    for (const auto& result : all_results) {
-        if (result.similarity >= threshold) {
-            filtered_results.push_back(result);
-        }
+    // 仅限制返回数量，低分和负分的有效向量也参与排名。
+    if (all_results.size() > static_cast<size_t>(top_k)) {
+        all_results.resize(top_k);
     }
     
-    // 如果没有结果满足阈值，返回最佳匹配
-    if (filtered_results.empty() && !all_results.empty()) {
-        filtered_results.push_back(all_results[0]);
-    }
-    
-    // 限制返回数量
-    if (static_cast<int>(filtered_results.size()) > top_k) {
-        filtered_results.resize(top_k);
-    }
-    
-    return filtered_results;
+    return all_results;
 }
 
 std::vector<SearchResult> VectorIndex::searchMMR(
     const std::vector<float>& query_embedding,
     int top_k,
-    const MMRConfig& config,
-    float threshold) const {
+    const MMRConfig& config) const {
     if (top_k <= 0 || config.fetch_k < top_k)
         throw std::invalid_argument("MMR requires positive top_k and fetch_k >= top_k");
     if (!std::isfinite(config.lambda) || config.lambda < 0.0f || config.lambda > 1.0f)
         throw std::invalid_argument("MMR lambda must be finite and within [0, 1]");
 
     // search 返回快照，后续两两比较无需长时间持有索引锁。
-    auto candidates = search(query_embedding, config.fetch_k, threshold);
+    auto candidates = search(query_embedding, config.fetch_k);
     const size_t limit = std::min(static_cast<size_t>(top_k), candidates.size());
     if (candidates.empty() || config.lambda == 1.0f) {
         candidates.resize(limit);

@@ -355,7 +355,6 @@ bool MCPAgentIntegration::initializeRAG() {
         
         // 检索配置
         retriever_config.top_k = config_.rag_config.top_k;
-        retriever_config.similarity_threshold = config_.rag_config.similarity_threshold;
         retriever_config.index_path = config_.rag_config.index_path;
         retriever_config.mmr.enabled = config_.rag_config.enable_mmr;
         retriever_config.mmr.fetch_k = config_.rag_config.mmr_fetch_k;
@@ -523,8 +522,6 @@ MCPAgentConfig parseMCPConfigFromArgs(int argc, char* argv[]) {
             config.rag_config.model = argv[++i];
         } else if (arg == "--rag-top-k" && i + 1 < argc) {
             config.rag_config.top_k = std::stoi(argv[++i]);
-        } else if (arg == "--rag-threshold" && i + 1 < argc) {
-            config.rag_config.similarity_threshold = std::stof(argv[++i]);
         } else if (arg == "--rag-mmr") {
             config.rag_config.enable_mmr = true;
         } else if (arg == "--rag-mmr-fetch-k" && i + 1 < argc) {
@@ -608,14 +605,6 @@ MCPAgentConfig parseMCPConfigFromEnv() {
     if (rag_top_k && rag_top_k[0] != '\0') {
         try {
             config.rag_config.top_k = std::stoi(rag_top_k);
-        } catch (...) {}
-    }
-    
-    // RAG_THRESHOLD
-    const char* rag_threshold = std::getenv("RAG_THRESHOLD");
-    if (rag_threshold && rag_threshold[0] != '\0') {
-        try {
-            config.rag_config.similarity_threshold = std::stof(rag_threshold);
         } catch (...) {}
     }
     

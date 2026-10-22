@@ -136,10 +136,16 @@ def report(data, directory):
     if data.get("evidence") == "fixture":
         lines.append("**模拟接口自检：以下准确率、token 与时间不能作为真实 RAG 效果结论。**")
     lines += [f"模型：{data['config']['model']}｜Embedding：{data['config']['embedding_model']}"
-              f"｜重复 {data['config']['repeats']} 次｜相似度阈值 {data['config']['threshold']}", "",
+              f"｜重复 {data['config']['repeats']} 次｜按排名选取候选工具", "",
              "## 1. 题目与目录", "",
              f"{len(data['cases'])} 题：{kinds['single']} 单工具、{kinds['multi']} 多工具、"
              f"{kinds['no_tool']} 无需工具。"]
+    multi_counts = [len({call['name'] for call in case['expected_calls']})
+                    for case in data['cases'] if case['kind'] == 'multi']
+    if multi_counts:
+        low, high = min(multi_counts), max(multi_counts)
+        count_text = str(low) if low == high else f"{low}～{high}"
+        lines.append(f"多工具题每题需要 {count_text} 个不同工具。")
     selection = data["config"].get("selection", "similarity")
     lines.append(f"筛选方式：{'MMR' if selection == 'mmr' else '普通相似度排序'}。")
     if selection == "mmr":
@@ -173,11 +179,11 @@ def report(data, directory):
 
     lines += ["", "### 正确工具为什么没进最终候选", "",
               "以下按遗漏工具次数统计：一道题缺两个工具会计两次。分数和排名来自原问题与工具的余弦相似度。", "",
-              "| 工具总数 | 低于阈值 | 候选池之外 | MMR未选入 | 普通排序被数量截断 | 无有效向量 |",
-              "|---:|---:|---:|---:|---:|---:|"]
+              "| 工具总数 | 候选池之外 | MMR未选入 | 普通排序被数量截断 | 无有效向量 |",
+              "|---:|---:|---:|---:|---:|"]
     for stage in data["stages"]:
         counts = Counter(miss["reason_code"] for miss in stage.get("misses", []))
-        lines.append(f"| {stage['size']} | {counts['threshold']} | {counts['pool']} | {counts['mmr']} "
+        lines.append(f"| {stage['size']} | {counts['pool']} | {counts['mmr']} "
                      f"| {counts['top_k']} | {counts['missing_vector']} |")
     lines += ["", "| 工具总数 | 问题编号 | 缺少的正确工具 | 相似度 | 原始排名 | 未选中的阶段原因 |",
               "|---:|---|---|---:|---:|---|"]
@@ -191,8 +197,7 @@ def report(data, directory):
                          f"| {miss['rank'] if miss['rank'] is not None else '无'} | {miss['reason']} |")
     if not any_misses:
         lines.append("| — | 本次没有遗漏必需工具 | — | — | — | — |")
-    lines += ["", "“低于阈值”可能同时排名靠后，表中优先标记阈值原因；"
-              "这些是筛选阶段的直接原因，不证明Embedding为什么把工具排低。", ""]
+    lines += ["", "这些是筛选阶段的直接原因，不证明Embedding为什么把工具排低。", ""]
 
     if data["config"].get("retrieval_only"):
         lines += ["", "## 3. 检索耗时", "",
@@ -201,7 +206,7 @@ def report(data, directory):
             lines.append(f"| {stage['size']} | {stage['retrieval_first_ms']:.2f} ms "
                          f"| {stage['retrieval_warm_ms']:.2f} ms |")
         lines += ["", "未调用对话模型：最终调用正确率和对话输入token均未测量。",
-                  "MMR只能重选候选池内的工具；被阈值过滤或排在候选池外的工具无法补回。",
+                  "MMR只能重选候选池内的工具，无法补回候选池之外的工具。",
                   "工具目录含模拟定义，题目为有限样本，召回结果不等于生产任务成功率。", ""]
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)

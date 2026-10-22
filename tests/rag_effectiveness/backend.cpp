@@ -63,7 +63,6 @@ int main() {
                     dimension = config.embedding_config.dimension;
                     config.embedding_config.max_retries = 1;
                     if (input.contains("embedding_url")) config.embedding_config.api_url = input.at("embedding_url");
-                    config.similarity_threshold = input.value("threshold", 0.3f);
                     index_path = input.at("index_path");
                     config.index_path = index_path;
                     config.cache_config.enabled = true;
@@ -136,7 +135,7 @@ int main() {
                 std::vector<rag::RetrievedTool> selected;
                 std::vector<rag::RetrievedTool> ranking;
                 if (requested_k >= static_cast<int>(indexed.size())) {
-                    // k 不小于目录大小：退化为全量，返回全部工具，不再受相似度阈值过滤。
+                    // k 不小于目录大小：退化为全量，返回全部工具。
                     selected = retriever->getAllTools();
                 } else {
                     selected = retriever->retrieve(input.at("query"), requested_k, mmr,
@@ -159,22 +158,14 @@ int main() {
                           {"cache_hits", after.hits - before.hits},
                           {"cache_misses", after.misses - before.misses}};
                 if (input.value("diagnostics", false)) {
-                    const auto threshold = retriever->getConfig().similarity_threshold;
-                    std::set<std::string> pool, selected_names;
+                    std::set<std::string> selected_names;
                     for (const auto& tool : selected) selected_names.insert(tool.name);
-                    for (const auto& tool : ranking) {
-                        if (tool.relevance_score >= threshold &&
-                            (!mmr.enabled || pool.size() < static_cast<size_t>(mmr.fetch_k)))
-                            pool.insert(tool.name);
-                    }
-                    if (pool.empty() && !ranking.empty()) pool.insert(ranking.front().name);
                     output["ranking"] = json::array();
                     for (size_t i = 0; i < ranking.size(); ++i) {
                         const auto& tool = ranking[i];
                         output["ranking"].push_back({{"name", tool.name}, {"rank", i + 1},
                             {"score", tool.relevance_score},
-                            {"passes_threshold", tool.relevance_score >= threshold},
-                            {"in_pool", pool.count(tool.name) != 0},
+                            {"in_pool", !mmr.enabled || i < static_cast<size_t>(mmr.fetch_k)},
                             {"selected", selected_names.count(tool.name) != 0}});
                     }
                 }

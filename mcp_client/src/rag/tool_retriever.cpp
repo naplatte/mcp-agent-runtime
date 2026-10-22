@@ -201,9 +201,9 @@ std::vector<RetrievedTool> ToolRetriever::retrieve(
         // 获取查询向量
         std::vector<float> query_embedding = getEmbedding(query);
 
-        // 仅评测诊断启用：保留未按阈值/K截断的排名，复用同一个查询向量。
+        // 仅评测诊断启用：保留未按 K 截断的排名，复用同一个查询向量。
         if (ranking) {
-            auto all = index_->search(query_embedding, static_cast<int>(index_->size()), -1.0f);
+            auto all = index_->search(query_embedding, static_cast<int>(index_->size()));
             ranking->reserve(all.size());
             for (const auto& item : all) {
                 ranking->push_back({item.tool.name, item.tool.description,
@@ -213,8 +213,8 @@ std::vector<RetrievedTool> ToolRetriever::retrieve(
         
         // 搜索
         auto search_results = mmr.enabled
-            ? index_->searchMMR(query_embedding, top_k, mmr, config_.similarity_threshold)
-            : index_->search(query_embedding, top_k, config_.similarity_threshold);
+            ? index_->searchMMR(query_embedding, top_k, mmr)
+            : index_->search(query_embedding, top_k);
         
         // 转换结果
         std::vector<RetrievedTool> results;

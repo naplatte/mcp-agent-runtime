@@ -68,7 +68,6 @@ config.rag_config.api_key = std::getenv("DASHSCOPE_API_KEY");
 config.rag_config.model = "text-embedding-v2";
 config.rag_config.dimension = 1536;
 config.rag_config.top_k = 5;
-config.rag_config.similarity_threshold = 0.3f;
 
 // 缓存配置
 config.rag_config.enable_cache = true;
@@ -111,7 +110,6 @@ std::string functions_json = mcp.getRelevantToolsAsJson(query);
 | model | string | "text-embedding-v2" | Embedding 模型 |
 | dimension | int | 1536 | 向量维度 |
 | top_k | int | 5 | 返回工具数量 |
-| similarity_threshold | float | 0.3 | 相似度阈值 |
 | index_path | string | "" | 索引文件路径 |
 | enable_cache | bool | true | 是否启用缓存 |
 | cache_max_size | size_t | 1000 | 缓存最大条目 |
@@ -226,7 +224,6 @@ index.loadFromFile("index.json");
 
 RetrieverConfig config;
 config.top_k = 5;
-config.similarity_threshold = 0.3f;
 
 ToolRetriever retriever(config);
 retriever.initialize();
@@ -314,21 +311,17 @@ config.rag_config.cache_max_size = 1000;
 config.rag_config.top_k = 3;
 ```
 
-### 3. 提高相似度阈值
+检索只根据相似度排名选取前 K 个有效工具，不按分数过滤。K 越大，越不容易漏工具，
+但发送给对话模型的工具说明也越多，需要结合调用正确率和输入 token 对照选择。
 
-```cpp
-// 过滤掉低相关度的工具
-config.rag_config.similarity_threshold = 0.5f;
-```
-
-### 4. 禁用工具验证
+### 3. 禁用工具验证
 
 ```cpp
 // 验证会增加延迟
 config.rag_config.enable_validation = false;
 ```
 
-### 5. 使用索引持久化
+### 4. 使用索引持久化
 
 ```cpp
 // 避免每次启动都重新向量化

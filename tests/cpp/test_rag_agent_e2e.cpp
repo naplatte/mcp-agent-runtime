@@ -103,7 +103,6 @@ void run(const std::string& server, const std::string& plugins,
     config.max_retry_count = 0;
     config.rag_config.enabled = true;
     config.rag_config.top_k = kTopK;
-    config.rag_config.similarity_threshold = 0.0f;
     // EmbeddingService reads DASHSCOPE_API_KEY itself; the key is never logged.
 
     MCPAgentIntegration integration;

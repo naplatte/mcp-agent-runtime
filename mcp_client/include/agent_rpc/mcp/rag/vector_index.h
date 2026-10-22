@@ -111,23 +111,20 @@ public:
      * @brief 搜索最相似的 K 个工具
      * @param query_embedding 查询向量
      * @param top_k 返回数量
-     * @param threshold 相似度阈值 (0-1)，低于此值的结果会被过滤
      * @return 搜索结果，按相似度降序排列
      */
     std::vector<SearchResult> search(
         const std::vector<float>& query_embedding,
-        int top_k,
-        float threshold = 0.0f) const;
+        int top_k) const;
 
     /**
      * @brief 从相似度候选池中按 MMR 选择工具，返回顺序为选择顺序。
-     * 阈值只作用于原始余弦分数；复用已有工具向量，不请求 Embedding。
+     * 复用已有工具向量，不请求 Embedding；候选只按排名和数量限制。
      */
     std::vector<SearchResult> searchMMR(
         const std::vector<float>& query_embedding,
         int top_k,
-        const MMRConfig& config,
-        float threshold = 0.0f) const;
+        const MMRConfig& config) const;
     
     /**
      * @brief 计算余弦相似度

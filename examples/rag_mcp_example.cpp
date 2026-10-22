@@ -22,7 +22,6 @@ void printUsage(const char* program) {
               << "  --mcp-server <path>   MCP Server executable path\n"
               << "  --enable-rag          Enable RAG-MCP for intelligent tool selection\n"
               << "  --top-k <n>           Number of tools to retrieve (default: 5)\n"
-              << "  --threshold <f>       Similarity threshold (default: 0.3)\n"
               << "  --help                Show this help message\n";
 }
 
@@ -33,7 +32,6 @@ int main(int argc, char* argv[]) {
     config.enable_mcp = false;
     config.rag_config.enabled = false;
     config.rag_config.top_k = 5;
-    config.rag_config.similarity_threshold = 0.3f;
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -47,8 +45,6 @@ int main(int argc, char* argv[]) {
             config.rag_config.enabled = true;
         } else if (arg == "--top-k" && i + 1 < argc) {
             config.rag_config.top_k = std::stoi(argv[++i]);
-        } else if (arg == "--threshold" && i + 1 < argc) {
-            config.rag_config.similarity_threshold = std::stof(argv[++i]);
         }
     }
     

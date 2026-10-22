@@ -32,7 +32,6 @@ struct RAGConfig {
     std::string api_key;                      // DashScope API Key，可从环境变量读取
     std::string model = "text-embedding-v2"; // Embedding 模型
     int top_k = 5;                            // 返回工具数量
-    float similarity_threshold = 0.3f;        // 相似度阈值
     std::string index_path;                   // 索引文件路径
     bool enable_cache = true;                 // 是否启用缓存
     size_t cache_max_size = 1000;             // 缓存最大条目

@@ -39,8 +39,8 @@ int main() {
         MMRConfig mmr;
         mmr.enabled = true;
         mmr.fetch_k = 3;
-        const auto ordinary = index.search(query, 2, 0.3f);
-        const auto diverse = index.searchMMR(query, 2, mmr, 0.3f);
+        const auto ordinary = index.search(query, 2);
+        const auto diverse = index.searchMMR(query, 2, mmr);
         require(names(ordinary) == std::vector<std::string>({"weather", "weather_history"}),
                 "ordinary ranking fixture is invalid");
         require(names(diverse) == std::vector<std::string>({"weather", "log"}),
@@ -49,20 +49,24 @@ int main() {
                 "returned score must remain original cosine, not MMR score");
 
         mmr.lambda = 1.0f;
-        require(names(index.searchMMR(query, 2, mmr, 0.3f)) == names(ordinary),
+        require(names(index.searchMMR(query, 2, mmr)) == names(ordinary),
                 "lambda=1 must recover ordinary ranking");
         mmr.lambda = 0.7f;
         mmr.fetch_k = 2;
-        require(names(index.searchMMR(query, 2, mmr, 0.3f)) == names(ordinary),
+        require(names(index.searchMMR(query, 2, mmr)) == names(ordinary),
                 "MMR must not select outside the fetch pool");
         mmr.fetch_k = 30;
-        require(index.searchMMR(query, 10, mmr, 0.3f).size() == 3,
+        require(index.searchMMR(query, 10, mmr).size() == 3,
                 "small indexes must not produce duplicates or padding");
-        const auto filtered = index.searchMMR(query, 2, mmr, 0.8f);
-        require(names(filtered) == names(ordinary), "threshold must filter before MMR");
-        const auto fallback = index.searchMMR(query, 2, mmr, 1.0f);
-        require(fallback.size() == 1 && fallback.front().tool.name == "weather",
-                "preserve the existing best-match fallback when all scores are below threshold");
+
+        // 全部候选为负分时仍按排名给足 K，不能退化成只返回一个工具。
+        const std::vector<float> reverse_query = {-1.0f, 0.0f};
+        const auto negative = index.search(reverse_query, 2);
+        require(negative.size() == 2 && negative[0].similarity < 0.0f &&
+                    negative[1].similarity < 0.0f && negative[0].tool.name == "log",
+                "negative cosine scores must remain eligible for top-k ranking");
+        require(index.searchMMR(reverse_query, 10, mmr).size() == 3,
+                "MMR must retain negative-score candidates when the budget permits");
 
         VectorIndex tied;
         tied.addTool(tool("z", 0.0f));
@@ -114,7 +118,7 @@ int main() {
         require(config.rag_config.enable_mmr && config.rag_config.mmr_fetch_k == 40 &&
                     std::abs(config.rag_config.mmr_lambda - 0.8f) < 1e-6f,
                 "integration command-line MMR configuration was not parsed");
-        std::cout << "[PASS] MMR diversity, budgets, thresholds, validation, ties and integration flags\n";
+        std::cout << "[PASS] MMR diversity, budgets, negative scores, validation, ties and integration flags\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "[FAIL] " << error.what() << '\n';

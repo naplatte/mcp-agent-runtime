@@ -134,7 +134,7 @@ def retrieval_metrics(suite, queries):
             "multi_hits": sum(multi), "multi_required": len(multi)}
 
 
-def retrieval_misses(suite, queries, selection, k, fetch_k, threshold):
+def retrieval_misses(suite, queries, selection, k, fetch_k):
     """标签只用于事后诊断；不传给检索器，也不影响候选选择。"""
     misses = []
     for case in suite:
@@ -148,14 +148,12 @@ def retrieval_misses(suite, queries, selection, k, fetch_k, threshold):
             entry = ranking.get(name)
             if entry is None:
                 code, reason = "missing_vector", "没有有效的工具向量记录"
-            elif not entry["passes_threshold"] and not entry["in_pool"]:
-                code, reason = "threshold", f"相似度低于阈值{threshold}，未进入候选"
             elif selection == "mmr" and not entry["in_pool"]:
                 code, reason = "pool", f"排名超过候选池上限{fetch_k}"
             elif selection == "mmr":
                 code, reason = "mmr", f"进入候选池，但MMR未选入最终{k}个"
             else:
-                code, reason = "top_k", f"通过阈值，但被最终{k}个的数量限制截断"
+                code, reason = "top_k", f"排名未进入最终{k}个，被数量限制截断"
             misses.append({"id": case["id"], "kind": case["kind"], "question": case["question"],
                            "tool": name, "reason_code": code, "reason": reason,
                            "rank": entry["rank"] if entry else None,
@@ -176,7 +174,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
         suite = [c for c in suite if c["id"] in chosen]
     data = {"status": "进行中", "evidence": "fixture" if getattr(args, "fixture", False) else "live", "config": {
         "model": args.model, "embedding_model": args.embedding_model,
-        "threshold": args.threshold, "repeats": args.repeats, "quick": args.quick,
+        "repeats": args.repeats, "quick": args.quick,
         "retrieval_only": retrieval_only, **selection_config,
         "chat_url": args.chat_url, "embedding_url": args.embedding_url},
         "cases": suite, "stages": [], "records": [], "started_at": dt.datetime.now(dt.timezone.utc).isoformat()}
@@ -201,7 +199,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
             print(f"\n[3/4] {size}个工具：新增索引，{selection} 最终最多{k}个工具。", flush=True)
             indexed = bridge.request({"op": "index", "tools": tools,
                                       "embedding_model": args.embedding_model, "dimension": args.dimension,
-                                      "embedding_url": args.embedding_url, "threshold": args.threshold,
+                                      "embedding_url": args.embedding_url,
                                       "index_path": str(Path(log_dir) / "tool_index.json")})
             retrieval, warm, baseline = {}, {}, {}
             # 基线目录只有 4 个真实工具，跨应用题的预期工具不在其中；这类题跳过，
@@ -236,12 +234,12 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                      "query_hits": sum(retrieval[c["id"]]["cache_hits"] for c in stage_suite),
                      "queries": retrieval}
             stage["misses"] = retrieval_misses(stage_suite, retrieval, selection, k,
-                                                selection_config["mmr_fetch_k"], args.threshold)
+                                                selection_config["mmr_fetch_k"])
             if baseline:
                 stage["baseline_retrieval"] = retrieval_metrics(stage_suite, baseline)
                 stage["baseline_queries"] = baseline
                 stage["baseline_misses"] = retrieval_misses(stage_suite, baseline, "similarity", k,
-                                                             selection_config["mmr_fetch_k"], args.threshold)
+                                                             selection_config["mmr_fetch_k"])
             if retrieval_only:
                 data["stages"].append(stage)
                 data["status"] = "完成：仅检索，未调用对话模型"
@@ -311,7 +309,6 @@ def main():
     parser.add_argument("--dimension", type=int, default=1536)
     parser.add_argument("--chat-url", default=DEFAULT_CHAT)
     parser.add_argument("--embedding-url", default=DEFAULT_EMBEDDING)
-    parser.add_argument("--threshold", type=float, default=0.3)
     parser.add_argument("--k", type=int, default=10, help="RAG 候选数；工具数不超过 k 时退化为全量")
     parser.add_argument("--selection", choices=("similarity", "mmr"), default="similarity",
                         help="候选选择方法；MMR报告同时给出相同k的普通排序召回")
@@ -326,8 +323,8 @@ def main():
     args = parser.parse_args()
     if os.name != "posix":
         parser.error("项目使用POSIX进程通信，请在Linux或WSL中运行")
-    if args.repeats < 1 or args.timeout < 1 or args.jobs < 1 or args.dimension < 1 or not 0 <= args.threshold <= 1:
-        parser.error("次数、超时、线程数、维度必须为正；阈值为0..1")
+    if args.repeats < 1 or args.timeout < 1 or args.jobs < 1 or args.dimension < 1:
+        parser.error("次数、超时、线程数、维度必须为正")
     if args.k < 1 or any(n < 1 for n in args.sizes):
         parser.error("k 和目录规模必须为正")
     if args.mmr_fetch_k < 1 or not math.isfinite(args.mmr_lambda) or not 0 <= args.mmr_lambda <= 1:

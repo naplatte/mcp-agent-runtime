@@ -81,23 +81,22 @@ def local_api():
 
 
 class ScoringTests(unittest.TestCase):
-    def test_miss_diagnostics_distinguish_filter_pool_and_selection(self):
+    def test_miss_diagnostics_distinguish_pool_and_selection(self):
         case = {"id": "fixture", "kind": "single", "question": "fixture",
                 "expected_calls": [{"name": "target", "arguments": {}}]}
-        entry = {"name": "target", "rank": 12, "score": 0.2,
-                 "passes_threshold": False, "in_pool": False}
+        entry = {"name": "target", "rank": 31, "score": -0.2, "in_pool": False}
         response = {"tools": [], "ranking": [entry]}
         def reason(selection="mmr"):
-            return retrieval_misses([case], {"fixture": response}, selection, 10, 30, 0.3)[0]
-        self.assertEqual(reason()["reason_code"], "threshold")
-        self.assertEqual(reason()["rank"], 12)
-        entry.update(rank=31, score=0.6, passes_threshold=True)
+            return retrieval_misses([case], {"fixture": response}, selection, 10, 30)[0]
         self.assertEqual(reason()["reason_code"], "pool")
+        self.assertEqual(reason()["rank"], 31)
         entry.update(rank=12, in_pool=True)
         self.assertEqual(reason()["reason_code"], "mmr")
         self.assertEqual(reason("similarity")["reason_code"], "top_k")
         response["tools"] = [{"name": "target"}]
-        self.assertEqual(retrieval_misses([case], {"fixture": response}, "mmr", 10, 30, 0.3), [])
+        self.assertEqual(retrieval_misses([case], {"fixture": response}, "mmr", 10, 30), [])
+        response.update(tools=[], ranking=[])
+        self.assertEqual(reason()["reason_code"], "missing_vector")
 
     def test_cases_and_catalogs_have_distinct_capabilities(self):
         suite = cases()
@@ -157,7 +156,7 @@ class BackendTests(unittest.TestCase):
                          definition("tail_log", "log", {}, []),
                          definition("other", "other", {}, [])]
                 bridge.request({"op": "index", "tools": tools, "fixture_key": "offline-fixture",
-                                "dimension": 8, "threshold": 0.3, "embedding_url": url + "/embedding",
+                                "dimension": 8, "embedding_url": url + "/embedding",
                                 "index_path": str(Path(directory) / "index.json")})
                 before = len(api.requests)
                 query = {"op": "retrieve", "query": "北京天气", "k": 2, "selection": "mmr",
@@ -167,9 +166,10 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(mmr["cache_misses"], 1)
                 self.assertEqual(len(mmr["ranking"]), 3)
                 target = next(r for r in mmr["ranking"] if r["name"] == "tail_log")
-                self.assertFalse(target["passes_threshold"])
-                self.assertFalse(target["in_pool"])
+                self.assertEqual(target["score"], 0.0)
+                self.assertTrue(target["in_pool"])
                 self.assertFalse(target["selected"])
+                self.assertEqual(len(mmr["tools"]), 2)
                 ordinary = bridge.request(dict(query, selection="similarity"))
                 self.assertEqual(ordinary["cache_misses"], 0)
                 self.assertEqual(len(api.requests), before + 1)
@@ -184,7 +184,7 @@ class BackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, local_api() as (api, url), \
                 patch.dict(os.environ, {"DASHSCOPE_API_KEY": "offline-fixture"}):
             args = types.SimpleNamespace(quick=True, repeats=1, model="fixture", embedding_model="fixture",
-                                         dimension=8, threshold=0.3, sizes=[50], k=10,
+                                         dimension=8, sizes=[50], k=10,
                                          selection="mmr", mmr_fetch_k=30, mmr_lambda=0.7,
                                          retrieval_only=True, fixture=True,
                                          chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3)
@@ -201,7 +201,10 @@ class BackendTests(unittest.TestCase):
             text_report = (Path(directory) / "report.md").read_text(encoding="utf-8")
             self.assertIn("普通排序与 MMR", text_report)
             self.assertIn("正确工具为什么没进最终候选", text_report)
-            self.assertIn("相似度低于阈值", text_report)
+            self.assertIn("普通排序被数量截断", text_report)
+            self.assertNotIn("相似度阈值", text_report)
+            self.assertNotIn("低于阈值", text_report)
+            self.assertIn("多工具题每题需要 2 个不同工具", text_report)
             self.assertIn("最终调用正确率和对话输入token均未测量", text_report)
 
     def test_actual_cpp_discovery_retrieval_cache_and_error_boundary(self):
@@ -212,7 +215,7 @@ class BackendTests(unittest.TestCase):
                                         "plugins": os.environ["RAG_EVAL_PLUGINS"], "logs": directory})["tools"]
                 self.assertEqual({t["name"] for t in tools}, {"get_weather", "tail_log", "analyze_log", "summarize_errors"})
                 response = bridge.request({"op": "index", "tools": tools, "fixture_key": "offline-fixture",
-                                           "dimension": 8, "threshold": 0.3, "embedding_url": url + "/embedding",
+                                           "dimension": 8, "embedding_url": url + "/embedding",
                                            "index_path": str(Path(directory) / "index.json")})
                 self.assertEqual(response["indexed"], 4)
                 first = bridge.request({"op": "retrieve", "query": "北京天气", "k": 1})
@@ -256,7 +259,7 @@ class BackendTests(unittest.TestCase):
     def check_complete_driver(self, selection):
         with tempfile.TemporaryDirectory() as directory, local_api() as (_, url), patch.dict(os.environ, {"DASHSCOPE_API_KEY": "offline-fixture"}):
             args = types.SimpleNamespace(quick=False, repeats=2, model="fixture", embedding_model="fixture",
-                                         dimension=8, threshold=0.3, sizes=[50, 100, 300], k=10,
+                                         dimension=8, sizes=[50, 100, 300], k=20 if selection == "similarity" else 10,
                                          selection=selection, mmr_fetch_k=30, mmr_lambda=0.7,
                                          chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3, fixture=True)
             with contextlib.redirect_stdout(io.StringIO()):
@@ -269,6 +272,7 @@ class BackendTests(unittest.TestCase):
             expected = sum(s["test_cases"] * 2 * args.repeats for s in data["stages"])
             self.assertEqual(len(data["records"]), expected)
             for stage in data["stages"]:
+                self.assertTrue(all(len(query['tools']) == stage['k'] for query in stage['queries'].values()))
                 # k 不小于目录大小时走退化分支，不产生查询向量
                 expected_misses = stage["test_cases"] if stage["k"] < stage["size"] else 0
                 self.assertEqual(stage["query_misses"], expected_misses)
@@ -280,6 +284,8 @@ class BackendTests(unittest.TestCase):
             self.assertIn("不能作为真实 RAG 效果结论", text_report)
             self.assertIn("全量", text_report)
             self.assertIn("失败案例", text_report)
+            self.assertNotIn("相似度阈值", text_report)
+            self.assertNotIn("低于阈值", text_report)
 
 
 if __name__ == "__main__":
