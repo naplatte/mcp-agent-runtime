@@ -1,5 +1,6 @@
 """Offline, meaningful regression checks. All HTTP is on 127.0.0.1."""
 import contextlib
+from collections import Counter
 import io
 import json
 import os
@@ -14,6 +15,7 @@ from unittest.mock import patch
 from dataset import cases, catalogs, definition, text
 from evaluation import aggregate, coverage, score
 from run import Bridge, evaluate
+import run
 
 
 def fixture_vector(value):
@@ -81,8 +83,10 @@ def local_api():
 class ScoringTests(unittest.TestCase):
     def test_cases_and_catalogs_have_distinct_capabilities(self):
         suite = cases()
-        self.assertEqual(len(suite), 30)
-        self.assertEqual(sum(c["split"] == "dev" for c in suite), 6)
+        self.assertEqual(len(suite), 80)
+        self.assertEqual(sum(c["split"] == "dev" for c in suite), 15)
+        kinds = Counter(c["kind"] for c in suite)
+        self.assertEqual((kinds["single"], kinds["multi"], kinds["no_tool"]), (40, 24, 16))
         self.assertTrue(any(c["kind"] == "multi" and c["split"] == "dev" for c in suite))
         base = [definition(name, name, {}, []) for name in ("get_weather", "tail_log", "analyze_log", "summarize_errors")]
         groups = catalogs(base, [50, 100])
@@ -175,16 +179,22 @@ class BackendTests(unittest.TestCase):
                                          chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3, fixture=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 code = evaluate(args, Path(os.environ["RAG_EVAL_BACKEND"]), Path(os.environ["RAG_EVAL_SERVER"]),
-                                Path(os.environ["RAG_EVAL_PLUGINS"]), Path(directory))
+                                Path(os.environ["RAG_EVAL_PLUGINS"]), Path(directory), Path(directory) / "logs")
             self.assertEqual(code, 0)
-            data = json.loads((Path(directory) / "summary.json").read_text())
+            data = run.LAST_RUN
             self.assertEqual(data["evidence"], "fixture")
-            self.assertEqual(len(data["records"]), 288)
             self.assertEqual([s["size"] for s in data["stages"]], [4, 50, 100])
-            self.assertTrue(all(s["query_misses"] == 24 and s["query_hits"] == 0 for s in data["stages"]))
+            expected = sum(s["test_cases"] * 2 * args.repeats for s in data["stages"])
+            self.assertEqual(len(data["records"]), expected)
+            self.assertTrue(all(s["query_misses"] == s["test_cases"] and s["query_hits"] == 0
+                                for s in data["stages"]))
             self.assertTrue(all(r["query_cache_misses"] == 0 for r in data["records"] if r["repeat"] == 2))
-            self.assertIn("不能作为真实RAG效果结论", (Path(directory) / "report.md").read_text())
-            self.assertEqual(len((Path(directory) / "details.jsonl").read_text().splitlines()), 288)
+            # 结果目录里只留一个中文报告
+            self.assertEqual([p.name for p in Path(directory).iterdir() if p.is_file()], ["report.md"])
+            text_report = (Path(directory) / "report.md").read_text()
+            self.assertIn("不能作为真实 RAG 效果结论", text_report)
+            self.assertIn("全量", text_report)
+            self.assertIn("失败案例", text_report)
 
 
 if __name__ == "__main__":

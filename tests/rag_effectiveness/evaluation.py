@@ -1,9 +1,10 @@
-"""Scoring and readable reports; metrics use measured API usage, never byte counts."""
+"""Scoring and a single concise Chinese report; metrics use measured API usage, never byte counts."""
 import json
 import math
 import statistics
 from collections import Counter
 from pathlib import Path
+
 from dataset import CITY_ALIASES
 
 
@@ -107,10 +108,8 @@ def aggregate(records):
             "selection_accuracy": mean([int(r["selection_correct"]) for r in valid]),
             "accuracy": mean([int(r["correct"]) for r in valid]),
             "prompt_tokens": mean([r["prompt_tokens"] for r in valid]),
-            "completion_tokens": mean([r["completion_tokens"] for r in valid]),
             "model_ms": mean([r["model_ms"] for r in valid]),
             "total_ms": mean([r["model_ms"] + r["retrieval_ms"] for r in valid]),
-            "warm_total_ms": mean([r["model_ms"] + r["warm_retrieval_ms"] for r in valid]),
             "no_tool_accuracy": mean([int(r["correct"]) for r in valid if r["kind"] == "no_tool"]),
             "multi_accuracy": mean([int(r["correct"]) for r in valid if r["kind"] == "multi"])}
 
@@ -120,97 +119,88 @@ def percent(value):
 
 
 def number(value, suffix=""):
-    return "未测得" if value is None else f"{value:.1f}{suffix}"
+    return "未测得" if value is None else f"{value:.0f}{suffix}"
 
 
 def report(data, directory):
-    directory = Path(directory)
-    lines = ["# RAG 工具筛选效果报告", "", f"**状态：{data['status']}**", "",
-             "## 1. 测试了什么", "",
-             f"- 模型：`{data['config']['model']}`；Embedding：`{data['config']['embedding_model']}`。",
-             f"- {len(data['cases'])} 个标注问题：{sum(c['split'] == 'dev' for c in data['cases'])} 个开发问题用于选 k，{sum(c['split'] == 'test' for c in data['cases'])} 个测试问题用于最终对照。重复次数：{data['config']['repeats']}。",
-             "- 基线目录通过真实 MCP 服务端发现天气、日志两个插件的工具；50/100 工具目录追加近似干扰项、热门 MCP 空壳工具和批量生成的业务工具定义。",
-             "- 本报告评测检索及模型首轮工具选择、参数生成；不执行业务API，不代表最终任务成功率。",
-             "- 模拟项是功能不同的工具定义，跨应用题目的预期工具也是空壳；评分只比对 tool_calls，不执行工具。",
-             "- k 只在开发集上选择；测试集不参与调参。温度固定为0，两组请求交替先后。",
-             "", "## 2. 检索有没有漏掉工具", "",
-             "完整命中率：问题所需的所有工具都在候选中。平均召回率：每题找回的必要工具占比。无需工具的问题不计入这两项。",
-             "", "|目录工具数|k|开发集完整命中率|测试集完整命中率|测试集平均召回率|平均候选数|",
-             "|---:|---:|---:|---:|---:|---:|"]
+    kinds = Counter(c["kind"] for c in data["cases"])
+    dev = sum(c["split"] == "dev" for c in data["cases"])
+    lines = ["# RAG 工具筛选对照", "",
+             f"状态：{data['status']}"]
     if data.get("evidence") == "fixture":
-        lines[2:2] = ["**仅模拟接口自检：下面的准确率、token与时间不能作为真实RAG效果结论。**", ""]
+        lines.append("**模拟接口自检：以下准确率、token 与时间不能作为真实 RAG 效果结论。**")
+    lines += [f"模型：{data['config']['model']}｜Embedding：{data['config']['embedding_model']}"
+              f"｜重复 {data['config']['repeats']} 次｜相似度阈值 {data['config']['threshold']}", "",
+             "## 1. 题目与目录", "",
+             f"{len(data['cases'])} 题（开发 {dev} / 测试 {len(data['cases']) - dev}）："
+             f"{kinds['single']} 单工具、{kinds['multi']} 多工具、{kinds['no_tool']} 无需工具。"]
+
+    sizes = [str(s["size"]) for s in data["stages"]]
+    skipped = [f"{s['size']} 工具目录：{s.get('cases', 0)} 题参与" +
+               (f"，跳过 {s['skipped']} 题（所需工具不在该目录内）" if s.get("skipped") else "") for s in data["stages"]]
+    lines += [f"工具目录：{' / '.join(sizes)}。"] + [f"- {s}" for s in skipped]
+
+    lines += ["", "## 2. 检索有没有漏工具（测试集）", "",
+              "| 目录 | 选用 k | 完整命中率 | 平均召回率 |", "|---:|---:|---:|---:|"]
     for stage in data["stages"]:
-        for k, metrics in stage["retrieval_metrics"].items():
-            mark = "（选用）" if int(k) == stage["chosen_k"] else ""
-            lines.append(f"|{stage['size']}|{k}{mark}|{percent(metrics['dev_complete'])}|"
-                         f"{percent(metrics['test_complete'])}|{percent(metrics['test_recall'])}|{number(metrics['candidates'])}|")
-    lines += ["", "## 3. 全量工具与 RAG 对照", "",
-              "调用正确率要求工具集合、参数类型和题目要求的参数值均正确；工具选择正确率只判断工具集合。",
-              "输入 token 来自真实接口 usage，不用JSON字符数代替。总耗时是检索耗时加模型首轮请求耗时，不含业务执行。",
-              "", "|工具数|方式|有效/计划请求|工具选择正确率|调用正确率|平均输入token|平均模型耗时|平均总耗时|",
-              "|---:|---|---:|---:|---:|---:|---:|---:|"]
+        metric = stage["retrieval_metrics"].get(str(stage["chosen_k"]), {})
+        lines.append(f"| {stage['size']} | {stage['chosen_k']} | {percent(metric.get('test_complete'))} "
+                     f"| {percent(metric.get('test_recall'))} |")
+
+    lines += ["", "## 3. 全量工具 vs RAG 筛选", "",
+              "| 目录 | 方式 | 调用正确率 | 工具选择正确率 | 平均输入 token |",
+              "|---:|---|---:|---:|---:|"]
     for stage in data["stages"]:
-        for arm in ("all", "rag"):
+        for arm, label in (("all", "全量"), ("rag", f"RAG k={stage['chosen_k']}")):
             row = stage["summary"][arm]
-            label = "全量" if arm == "all" else f"RAG k={stage['chosen_k']}"
-            lines.append(f"|{stage['size']}|{label}|{row['valid']}/{row['requests']}|{percent(row['selection_accuracy'])}|"
-                         f"{percent(row['accuracy'])}|{number(row['prompt_tokens'])}|{number(row['model_ms'], 'ms')}|{number(row['total_ms'], 'ms')}|")
-    lines += ["", "各目录参与对照的题数（基线目录只有 4 个真实工具，跨应用题跳过；"
-              "准确率只在同一目录内两组之间可比）：", ""]
+            lines.append(f"| {stage['size']} | {label} | {percent(row['accuracy'])} "
+                         f"| {percent(row['selection_accuracy'])} | {number(row['prompt_tokens'])} |")
+
+    lines += ["", "## 4. 可以直接说的结论", ""]
     for stage in data["stages"]:
-        lines.append(f"- {stage['size']} 个工具：{stage.get('cases', 0)} 题参与，"
-                     f"跳过 {stage.get('skipped', 0)} 题（所需工具不在该目录内）。")
-    lines += ["", "## 4. 缓存、额外开销与收益", ""]
-    for stage in data["stages"]:
-        a, b = stage["summary"]["all"], stage["summary"]["rag"]
-        savings = None if not a["prompt_tokens"] or b["prompt_tokens"] is None else 1 - b["prompt_tokens"] / a["prompt_tokens"]
-        difference = None if a["accuracy"] is None or b["accuracy"] is None else (b["accuracy"] - a["accuracy"]) * 100
-        lines += [f"### {stage['size']} 个工具", "",
-                  f"- 输入 token 减少比例：**{percent(savings)}**；调用正确率变化：**{number(difference, ' 个百分点')}**。",
-                  f"- 索引扩展耗时：{number(stage['index']['build_ms'], 'ms')}；新增工具文本缓存未命中：{stage['index']['cache_misses']} 次。",
-                  f"- 测试集首轮查询：缓存未命中 {stage['query_misses']} 次、命中 {stage['query_hits']} 次；平均检索耗时 {number(stage['retrieval_first_ms'], 'ms')}。",
-                  f"- 同一问题再次检索：平均 {number(stage['retrieval_warm_ms'], 'ms')}；RAG缓存命中时的检索+模型总耗时 {number(b['warm_total_ms'], 'ms')}。",
-                  f"- 无需工具问题正确率：全量 {percent(a['no_tool_accuracy'])} / RAG {percent(b['no_tool_accuracy'])}。",
-                  f"- 多工具问题调用正确率：全量 {percent(a['multi_accuracy'])} / RAG {percent(b['multi_accuracy'])}。", ""]
-    lines += ["每个目录选定k后，重新加载已有工具向量并清空查询缓存；测试集首轮检索按选定k实测冷查询，再立即重复查询测缓存命中。重复模型测试从第二轮起按缓存命中耗时计算。",
-              "索引构建是一次性成本，未加入每题总耗时。Embedding缓存未命中次数不是厂商计费token，也不等于包含重试的精确HTTP请求数；本报告不宣称货币成本一定下降。",
-              "接口如返回缓存token信息，会保存在原始记录中；模型侧自动缓存与网络波动仍可能影响耗时。", "",
-              "## 5. 怎么判断有没有效", "",
-              "1. 先看检索完整命中率：漏掉必要工具，模型通常无法完成该任务。",
-              "2. 再看调用正确率：候选减少之后，是否保持或改善了正确调用。",
-              "3. 最后看输入token和包含检索的总耗时：token减少不等于延迟或总成本一定减少。",
-              "4. 模拟目录结果只说明这些测试问题及工具定义下的表现；少量样本不能证明生产场景的普遍提升。",
-              "5. 若有API失败或评测中断，状态为不完整/失败；正确率按有效请求计算，不能直接作完整的两组结论。", "",
-              "## 6. 失败案例", ""]
+        base, rag = stage["summary"]["all"], stage["summary"]["rag"]
+        savings = None if not base["prompt_tokens"] or rag["prompt_tokens"] is None \
+            else 1 - rag["prompt_tokens"] / base["prompt_tokens"]
+        delta = None if base["accuracy"] is None or rag["accuracy"] is None \
+            else (rag["accuracy"] - base["accuracy"]) * 100
+        lines.append(f"- {stage['size']} 个工具：输入 token 降 {percent(savings)}，"
+                     f"调用正确率 {percent(base['accuracy'])} → {percent(rag['accuracy'])}"
+                     f"（{'+' if (delta or 0) >= 0 else ''}{number(delta)} 个百分点）。")
+    if data["stages"]:
+        last = data["stages"][-1]["summary"]
+        lines.append(f"- 无需工具题正确率：全量 {percent(last['all']['no_tool_accuracy'])} / "
+                     f"RAG {percent(last['rag']['no_tool_accuracy'])}；"
+                     f"多工具题：全量 {percent(last['all']['multi_accuracy'])} / "
+                     f"RAG {percent(last['rag']['multi_accuracy'])}。")
+
     failures = [r for r in data["records"] if r.get("api_error") or not r.get("correct")]
+    lines += ["", "## 5. 失败案例", ""]
     if not failures:
-        lines.append("本次有效测试请求未发现失败；样本规模仍需结合前面的限制理解。")
-    for r in failures[:20]:
-        lines += [f"### {r['size']}工具 / {r['arm']} / {r['id']} / 第{r['repeat']}次", "",
-                  f"- 问题：{r['question']}", f"- 预期工具：{r['expected_names']}",
-                  f"- 候选工具：{r['candidate_names']}", f"- 实际调用：{r.get('called', [])}",
-                  f"- 原因：{r.get('api_error') or '；'.join(r.get('reasons', []))}", ""]
-    lines += [f"共 {len(failures)} 条失败/异常记录；完整内容见 `details.jsonl`。", ""]
+        lines.append("本次没有失败记录。")
+    for r in failures[:8]:
+        reason = r.get("api_error") or "；".join(r.get("reasons", [])[:2])
+        lines.append(f"- [{r['size']}/{r['arm']}/{r['id']}] 预期 {r['expected_names']}，"
+                     f"实际 {r.get('called', [])} —— {reason}")
+    if len(failures) > 8:
+        lines.append(f"- 其余 {len(failures) - 8} 条略。")
+
+    lines += ["", "## 6. 局限", "",
+              "- 除 4 个真实工具外，其余为只有元数据的模拟定义，不执行真实业务。",
+              f"- 单模型、单 Embedding、重复 {data['config']['repeats']} 次；结论只对这组题成立，不是生产准确率。",
+              "- 全量组与 RAG 组使用同一批工具定义与问题，比较只在同一目录内成立。", ""]
+
+    directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
-    (directory / "summary.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    with (directory / "details.jsonl").open("w", encoding="utf-8") as f:
-        for row in data["records"]:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def console(data, directory):
-    title = "模拟接口自检（不是效果数据）" if data.get("evidence") == "fixture" else "真实Embedding + 模型API"
-    print(f"\n========== RAG效果对照：{title} ==========")
-    print("评测范围：检索、工具选择、参数生成；不含业务API执行。")
+    print(f"\n========== RAG 工具筛选对照 ==========\n状态：{data['status']}")
     for stage in data["stages"]:
-        print(f"\n[{stage['size']}个工具，开发集选定 k={stage['chosen_k']}，"
-              f"{stage.get('cases', 0)} 题参与，跳过 {stage.get('skipped', 0)} 题]")
-        for arm in ("all", "rag"):
-            row = stage["summary"][arm]
-            label = "全量工具" if arm == "all" else "RAG筛选"
-            print(f"  {label}：调用正确率 {percent(row['accuracy'])}，输入token {number(row['prompt_tokens'])}，"
-                  f"检索+模型 {number(row['total_ms'], 'ms')}，有效请求 {row['valid']}/{row['requests']}")
-        metric = stage["retrieval_metrics"][str(stage["chosen_k"])]
-        print(f"  测试集候选完整命中率：{percent(metric['test_complete'])}")
-    print(f"\n状态：{data['status']}\n详细中文报告：{Path(directory) / 'report.md'}")
+        base, rag = stage["summary"]["all"], stage["summary"]["rag"]
+        metric = stage["retrieval_metrics"].get(str(stage["chosen_k"]), {})
+        print(f"\n[{stage['size']} 个工具，k={stage['chosen_k']}，{stage.get('cases', 0)} 题]")
+        print(f"  检索完整命中率 {percent(metric.get('test_complete'))}，平均召回 {percent(metric.get('test_recall'))}")
+        print(f"  全量：调用正确率 {percent(base['accuracy'])}，token {number(base['prompt_tokens'])}")
+        print(f"  RAG ：调用正确率 {percent(rag['accuracy'])}，token {number(rag['prompt_tokens'])}")
+    print(f"\n报告：{Path(directory) / 'report.md'}")

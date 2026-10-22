@@ -22,10 +22,14 @@ ROOT = HERE.parent.parent
 DEFAULT_CHAT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 DEFAULT_EMBEDDING = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
 
+# 最近一次评测的内存结果，仅供自检断言使用；不落盘。
+LAST_RUN = {}
+
 
 class Bridge:
-    def __init__(self, executable, directory):
-        self.log = (Path(directory) / "backend.log").open("w", encoding="utf-8")
+    def __init__(self, executable, log_dir):
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        self.log = (Path(log_dir) / "backend.log").open("w", encoding="utf-8")
         self.process = subprocess.Popen([str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=self.log, text=True, encoding="utf-8", bufsize=1)
         self.selector = selectors.DefaultSelector()
@@ -59,17 +63,18 @@ class Bridge:
             self.log.close()
 
 
-def build(build_dir, output, jobs):
+def build(build_dir, log_dir, jobs):
     print("[1/4] 构建项目C++检索器、MCP服务端与天气/日志插件……", flush=True)
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
     commands = [
         ["cmake", "-S", str(HERE), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
         ["cmake", "--build", str(build_dir), "--target", "rag_eval_backend", "mcp_server", "weather", "log_analyzer", "-j", str(jobs)],
     ]
-    with (output / "build.log").open("w", encoding="utf-8") as log:
+    with (Path(log_dir) / "build.log").open("w", encoding="utf-8") as log:
         for command in commands:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
             if result.returncode:
-                raise RuntimeError(f"构建失败，详情见 {output / 'build.log'}")
+                raise RuntimeError(f"构建失败，详情见 {Path(log_dir) / 'build.log'}")
     plugins = build_dir / "eval_plugins"
     plugins.mkdir(exist_ok=True)
     for name, subdir in (("weather", "weather"), ("log_analyzer", "log-analyzer")):
@@ -107,7 +112,7 @@ def ask_model(key, model, url, question, tools, timeout):
     return body["choices"][0]["message"], usage, elapsed
 
 
-def evaluate(args, executable, server, plugins, directory):
+def evaluate(args, executable, server, plugins, directory, log_dir):
     suite = cases()
     if args.quick:
         chosen = {"weather-2", "tail-2", "filter-2", "summary-2", "gh-search-1", "slack-post-1",
@@ -118,10 +123,10 @@ def evaluate(args, executable, server, plugins, directory):
         "threshold": args.threshold, "repeats": args.repeats, "quick": args.quick,
         "chat_url": args.chat_url, "embedding_url": args.embedding_url},
         "cases": suite, "stages": [], "records": [], "started_at": dt.datetime.now(dt.timezone.utc).isoformat()}
-    bridge = Bridge(executable, directory)
+    bridge = Bridge(executable, log_dir)
     try:
         print("[2/4] 通过真实MCP连接发现工具，生成带干扰项的扩展目录……", flush=True)
-        real = bridge.request({"op": "discover", "server": str(server), "plugins": str(plugins), "logs": str(directory)})["tools"]
+        real = bridge.request({"op": "discover", "server": str(server), "plugins": str(plugins), "logs": str(log_dir)})["tools"]
         names = {t["name"] for t in real}
         required = {c["name"] for case in suite for c in case["expected_calls"]}
         # 标注既可能指向真实插件工具，也可能指向纯元数据的空壳工具（不执行、只评分）。
@@ -142,7 +147,7 @@ def evaluate(args, executable, server, plugins, directory):
             indexed = bridge.request({"op": "index", "tools": tools,
                                       "embedding_model": args.embedding_model, "dimension": args.dimension,
                                       "embedding_url": args.embedding_url, "threshold": args.threshold,
-                                      "index_path": str(directory / "tool_index.json")})
+                                      "index_path": str(Path(log_dir) / "tool_index.json")})
             retrieval, warm = {}, {}
             metrics = {}
             # 基线目录只有 4 个真实工具，跨应用题的预期工具不在其中；这类题跳过，
@@ -186,7 +191,8 @@ def evaluate(args, executable, server, plugins, directory):
                     "test_recall": mean([v[1] for v in values if v[0] == "test"]),
                     "candidates": mean([v[3] for v in values if v[0] == "test"])}
             stage = {"size": size, "chosen_k": chosen_k, "index": indexed, "retrieval_metrics": metrics,
-                     "cases": len(stage_suite), "skipped": len(suite) - len(stage_suite),
+                     "cases": len(stage_suite), "test_cases": len(test),
+                     "skipped": len(suite) - len(stage_suite),
                      "retrieval_first_ms": mean([retrieval[c["id"]]["retrieval_ms"] for c in test]),
                      "retrieval_warm_ms": mean([r["retrieval_ms"] for r in warm.values()]),
                      "query_misses": sum(retrieval[c["id"]]["cache_misses"] for c in test),
@@ -217,18 +223,19 @@ def evaluate(args, executable, server, plugins, directory):
                             record["api_error"] = str(error)
                         records.append(record)
                         data["records"].append(record)
-                        # Preserve every completed request even if a later request is interrupted.
-                        with (directory / "progress.jsonl").open("a", encoding="utf-8") as f:
-                            f.write(json.dumps(record, ensure_ascii=False) + "\n")
                     print(f"  对照进度：第{repeat}次 {i+1}/{len(test)}题", flush=True)
             stage["summary"] = {arm: aggregate([r for r in records if r["arm"] == arm]) for arm in ("all", "rag")}
             data["stages"].append(stage)
             data["status"] = "不完整：存在API失败" if any(r.get("api_error") for r in data["records"]) else "完成"
             report(data, directory)
         console(data, directory)
+        LAST_RUN.clear()
+        LAST_RUN.update(data)
         return 1 if "不完整" in data["status"] else 0
     except BaseException:
         data["status"] = "失败：评测中断，已有数据仅供排查"
+        LAST_RUN.clear()
+        LAST_RUN.update(data)
         if data["stages"]:
             report(data, directory)
         raise
@@ -267,9 +274,9 @@ def main():
         return 77
     identifier = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     directory = args.output.resolve() / (("self-test-" if args.self_test else "live-") + identifier)
-    directory.mkdir(parents=True)
+    log_dir = args.build_dir.resolve() / "logs" / directory.name
     try:
-        executable, server, plugins = build(args.build_dir.resolve(), directory, args.jobs)
+        executable, server, plugins = build(args.build_dir.resolve(), log_dir, args.jobs)
         if args.self_test:
             env = dict(os.environ, RAG_EVAL_BACKEND=str(executable), RAG_EVAL_SERVER=str(server), RAG_EVAL_PLUGINS=str(plugins))
             env["NO_PROXY"] = "127.0.0.1,localhost"
@@ -277,10 +284,15 @@ def main():
             if result.returncode == 0:
                 print("\n[自检通过] 真实C++检索器 + 本地模拟Embedding/模型接口；不是RAG效果评测结果。")
             return result.returncode
-        return evaluate(args, executable, server, plugins, directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        return evaluate(args, executable, server, plugins, directory, log_dir)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-        (directory / "failure.json").write_text(json.dumps({"status": "失败，未完成效果评测", "error": str(error)}, ensure_ascii=False), encoding="utf-8")
-        print(f"[失败] {error}\n本次目录：{directory}", file=sys.stderr)
+        if not args.self_test:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "report.md").write_text(
+                f"# RAG 工具筛选对照\n\n状态：失败，未完成评测\n\n原因：{error}\n\n日志：{log_dir}\n",
+                encoding="utf-8")
+        print(f"[失败] {error}\n日志目录：{log_dir}", file=sys.stderr)
         return 1
 
 
