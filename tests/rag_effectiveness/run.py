@@ -122,7 +122,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
     if args.quick:
         chosen = {"weather-2", "tail-2", "filter-2", "summary-2", "gh-search-1", "slack-post-1",
                   "fs-list-1", "web-search-1", "multi-3", "multi-7", "no-tool-2", "no-tool-4"}
-        suite = [c for c in suite if c["split"] == "dev" or c["id"] in chosen]
+        suite = [c for c in suite if c["id"] in chosen]
     data = {"status": "进行中", "evidence": "fixture" if getattr(args, "fixture", False) else "live", "config": {
         "model": args.model, "embedding_model": args.embedding_model,
         "threshold": args.threshold, "repeats": args.repeats, "quick": args.quick,
@@ -143,71 +143,52 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
         sizes = [50] if args.quick else args.sizes
         for tools in catalogs(real, sizes):
             size = len(tools)
-            ks = sorted(set(k for k in args.k_values if 0 < k < size))
-            if not ks:
-                raise RuntimeError("没有小于工具总数的有效k值")
+            k = min(args.k, size)  # 工具数不超过 k 时，RAG 退化为全量
             data["catalogs"].append({"size": size, "tools": tools,
                                      "synthetic_names": [t["name"] for t in tools if t["name"] not in names]})
-            print(f"\n[3/4] {size}个工具：新增索引，开发集比较k={ks}。", flush=True)
+            print(f"\n[3/4] {size}个工具：新增索引，RAG 固定 k={k}。", flush=True)
             indexed = bridge.request({"op": "index", "tools": tools,
                                       "embedding_model": args.embedding_model, "dimension": args.dimension,
                                       "embedding_url": args.embedding_url, "threshold": args.threshold,
                                       "index_path": str(Path(log_dir) / "tool_index.json")})
             retrieval, warm = {}, {}
-            metrics = {}
             # 基线目录只有 4 个真实工具，跨应用题的预期工具不在其中；这类题跳过，
             # 不记成失败，也不参与该目录的检索指标。
             stage_names = {t["name"] for t in tools}
             stage_suite = [c for c in suite
                            if {call["name"] for call in c["expected_calls"]} <= stage_names]
-            development = [c for c in stage_suite if c["split"] == "dev"]
-            for case in development:
-                retrieval[case["id"]] = bridge.request({"op": "retrieve", "query": case["question"], "k": max(ks)})
-            def dev_key(k):
-                values = [coverage(c, [t["name"] for t in retrieval[c["id"]]["tools"][:k]]) for c in development]
-                return (mean([int(v[1]) for v in values if v[1] is not None]), mean([v[0] for v in values]), -k)
-            chosen_k = max(ks, key=dev_key)
             bridge.request({"op": "reset_query_cache"})
-            test = [c for c in stage_suite if c["split"] == "test"]
-            for i, case in enumerate(test):
-                first = bridge.request({"op": "retrieve", "query": case["question"], "k": chosen_k})
-                warm[case["id"]] = bridge.request({"op": "retrieve", "query": case["question"], "k": chosen_k})
-                if first["cache_misses"] != 1 or warm[case["id"]]["cache_misses"] != 0 or warm[case["id"]]["cache_hits"] != 1:
+            for i, case in enumerate(stage_suite):
+                first = bridge.request({"op": "retrieve", "query": case["question"], "k": k})
+                warm[case["id"]] = bridge.request({"op": "retrieve", "query": case["question"], "k": k})
+                if k < size and (first["cache_misses"] != 1 or warm[case["id"]]["cache_misses"] != 0
+                                 or warm[case["id"]]["cache_hits"] != 1):
                     raise RuntimeError("冷查询/重复查询缓存状态不符合预期")
-                # Extra k values share the already computed query vector. Timings
-                # remain those measured at the actually chosen k.
-                expanded = bridge.request({"op": "retrieve", "query": case["question"], "k": max(ks)})
-                if expanded["tools"][:chosen_k] != first["tools"]:
-                    raise RuntimeError("排序结果前缀与实际k检索不一致，拒绝混用候选和计时")
-                first["tools"], first["scores"] = expanded["tools"], expanded["scores"]
                 retrieval[case["id"]] = first
                 if (i + 1) % 6 == 0:
-                    print(f"  测试集检索进度：{i+1}/{len(test)}", flush=True)
-            for k in ks:
-                values = []
-                for case in stage_suite:
-                    subset = retrieval[case["id"]]["tools"][:k]
-                    recall, complete = coverage(case, [t["name"] for t in subset])
-                    values.append((case["split"], recall, complete, len(subset)))
-                metrics[str(k)] = {
-                    "dev_complete": mean([int(v[2]) for v in values if v[0] == "dev" and v[2] is not None]),
-                    "dev_recall": mean([v[1] for v in values if v[0] == "dev"]),
-                    "test_complete": mean([int(v[2]) for v in values if v[0] == "test" and v[2] is not None]),
-                    "test_recall": mean([v[1] for v in values if v[0] == "test"]),
-                    "candidates": mean([v[3] for v in values if v[0] == "test"])}
-            stage = {"size": size, "chosen_k": chosen_k, "index": indexed, "retrieval_metrics": metrics,
-                     "cases": len(stage_suite), "test_cases": len(test),
+                    print(f"  检索进度：{i+1}/{len(stage_suite)}", flush=True)
+            values = []
+            for case in stage_suite:
+                subset = retrieval[case["id"]]["tools"][:k]
+                recall, complete = coverage(case, [t["name"] for t in subset])
+                values.append((recall, complete, len(subset)))
+            metrics = {"complete": mean([int(v[1]) for v in values if v[1] is not None]),
+                       "recall": mean([v[0] for v in values]),
+                       "candidates": mean([v[2] for v in values])}
+            stage = {"size": size, "k": k, "index": indexed, "retrieval": metrics,
+                     "cases": len(stage_suite), "test_cases": len(stage_suite),
                      "skipped": len(suite) - len(stage_suite),
-                     "retrieval_first_ms": mean([retrieval[c["id"]]["retrieval_ms"] for c in test]),
+                     "retrieval_first_ms": mean([retrieval[c["id"]]["retrieval_ms"] for c in stage_suite]),
                      "retrieval_warm_ms": mean([r["retrieval_ms"] for r in warm.values()]),
-                     "query_misses": sum(retrieval[c["id"]]["cache_misses"] for c in test),
-                     "query_hits": sum(retrieval[c["id"]]["cache_hits"] for c in test), "queries": retrieval}
-            print(f"  开发集选定k={chosen_k}；本目录 {len(stage_suite)} 题参与（跳过 {stage['skipped']} 题："
-                  f"所需工具不在该目录内）；[4/4] {len(test)}题 × 两组 × {args.repeats}次真实模型对照。", flush=True)
+                     "query_misses": sum(retrieval[c["id"]]["cache_misses"] for c in stage_suite),
+                     "query_hits": sum(retrieval[c["id"]]["cache_hits"] for c in stage_suite),
+                     "queries": retrieval}
+            print(f"  本目录 {len(stage_suite)} 题参与（跳过 {stage['skipped']} 题：所需工具不在该目录内）；"
+                  f"[4/4] {len(stage_suite)}题 × 两组 × {args.repeats}次真实模型对照。", flush=True)
             records = []
             for repeat in range(1, args.repeats + 1):
-                for i, case in enumerate(test):
-                    selected = retrieval[case["id"]]["tools"][:chosen_k]
+                for i, case in enumerate(stage_suite):
+                    selected = retrieval[case["id"]]["tools"][:k]
                     for arm in (("all", "rag") if (i + repeat) % 2 else ("rag", "all")):
                         supplied = tools if arm == "all" else selected
                         timing = retrieval[case["id"]]
@@ -229,7 +210,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                             record["api_error"] = str(error)
                         records.append(record)
                         data["records"].append(record)
-                    print(f"  对照进度：第{repeat}次 {i+1}/{len(test)}题", flush=True)
+                    print(f"  对照进度：第{repeat}次 {i+1}/{len(stage_suite)}题", flush=True)
             stage["summary"] = {arm: aggregate([r for r in records if r["arm"] == arm]) for arm in ("all", "rag")}
             data["stages"].append(stage)
             data["status"] = "不完整：存在API失败" if any(r.get("api_error") for r in data["records"]) else "完成"
@@ -263,7 +244,7 @@ def main():
     parser.add_argument("--chat-url", default=DEFAULT_CHAT)
     parser.add_argument("--embedding-url", default=DEFAULT_EMBEDDING)
     parser.add_argument("--threshold", type=float, default=0.3)
-    parser.add_argument("--k-values", type=lambda s: [int(v) for v in s.split(",")], default=[1, 3, 5])
+    parser.add_argument("--k", type=int, default=10, help="RAG 候选数；工具数不超过 k 时退化为全量")
     parser.add_argument("--sizes", type=lambda s: [int(v) for v in s.split(",")], default=[50, 100, 300])
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=90)
@@ -275,8 +256,8 @@ def main():
         parser.error("项目使用POSIX进程通信，请在Linux或WSL中运行")
     if args.repeats < 1 or args.timeout < 1 or args.jobs < 1 or args.dimension < 1 or not 0 <= args.threshold <= 1:
         parser.error("次数、超时、线程数、维度必须为正；阈值为0..1")
-    if not args.k_values or any(k < 1 for k in args.k_values) or any(n < 1 for n in args.sizes):
-        parser.error("k和目录规模必须为正")
+    if args.k < 1 or any(n < 1 for n in args.sizes):
+        parser.error("k 和目录规模必须为正")
     if args.live and not chat_key(os.environ, args.chat_key_env):
         print(f"[未运行] 请先设置{args.chat_key_env}（对话模型密钥）；缺少密钥不是测试通过。", file=sys.stderr)
         return 77

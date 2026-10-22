@@ -3,6 +3,7 @@
 #include "agent_rpc/mcp/mcp_agent_integration.h"
 #include "agent_rpc/mcp/rag/tool_retriever.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -116,15 +117,22 @@ int main() {
                 output = {{"indexed", indexed.size()}};
             } else if (op == "retrieve") {
                 if (!retriever) throw std::runtime_error("Index is not initialized");
-                const int k = input.at("k");
-                if (k <= 0 || k >= static_cast<int>(indexed.size()))
-                    throw std::runtime_error("k must be positive and smaller than the catalog");
+                const int requested_k = input.at("k");
+                if (requested_k <= 0)
+                    throw std::runtime_error("k must be positive");
+                // k 不小于目录大小时退化为全量，用于观察「RAG 退化为全量」这一档。
                 auto before = retriever->getCacheStats();
                 auto start = Clock::now();
-                auto selected = retriever->retrieve(input.at("query"), k);
+                std::vector<rag::RetrievedTool> selected;
+                if (requested_k >= static_cast<int>(indexed.size())) {
+                    // k 不小于目录大小：退化为全量，返回全部工具，不再受相似度阈值过滤。
+                    selected = retriever->getAllTools();
+                } else {
+                    selected = retriever->retrieve(input.at("query"), requested_k);
+                }
                 const double duration = elapsed(start);
                 auto after = retriever->getCacheStats();
-                if (selected.empty() || selected.size() > static_cast<size_t>(k))
+                if (selected.empty() || selected.size() > static_cast<size_t>(requested_k))
                     throw std::runtime_error("RAG returned no valid subset; no fallback to all tools");
                 std::vector<ToolInfo> definitions;
                 json scores = json::array();

@@ -204,9 +204,8 @@ def catalogs(real_tools, sizes):
 def cases():
     result = []
 
-    def add(identifier, question, calls, split="test", kind="single"):
-        result.append({"id": identifier, "question": question, "expected_calls": calls,
-                       "split": split, "kind": kind})
+    def add(identifier, question, calls, kind="single"):
+        result.append({"id": identifier, "question": question, "expected_calls": calls, "kind": kind})
 
     def call(name, **arguments):
         return {"name": name, "arguments": arguments}
@@ -218,7 +217,7 @@ def cases():
 
     # ================================================== 单工具：真实插件（16）
     add("weather-1", f"查询北京现在的天气综合报告，包括温度和湿度。纬度39.9，经度116.4。",
-        [weather("北京", "39.9", "116.4")], split="dev")
+        [weather("北京", "39.9", "116.4")])
     add("weather-2", "帮我看看上海现在的天气情况，包括温度和湿度。坐标：纬度31.2、经度121.5。",
         [weather("上海", "31.2", "121.5")])
     add("weather-3", "查一下成都的温度、湿度等天气信息，经纬度是30.7（纬度）、104.1（经度）。",
@@ -226,13 +225,13 @@ def cases():
     add("weather-4", "Please fetch a general weather report for 深圳, latitude 22.5, longitude 114.1.",
         [weather("深圳", "22.5", "114.1")])
 
-    add("tail-1", f"显示文件{path}最后20行。", [call("tail_log", path=path, lines=20)], split="dev")
+    add("tail-1", f"显示文件{path}最后20行。", [call("tail_log", path=path, lines=20)])
     add("tail-2", f"只看日志{path}末尾50行的原文，不做摘要。", [call("tail_log", path=path, lines=50)])
     add("tail-3", f"把{path}最近写入的10行取出来。", [call("tail_log", path=path, lines=10)])
     add("tail-4", f"Show the last 15 lines of {path}.", [call("tail_log", path=path, lines=15)])
 
     add("filter-1", f"在{path}最近200行中查找包含字面关键词timeout的日志。",
-        [call("analyze_log", path=path, keyword="timeout", max_lines=200)], split="dev")
+        [call("analyze_log", path=path, keyword="timeout", max_lines=200)])
     add("filter-2", f"从{path}最近200行筛出包含connection的原始日志行。",
         [call("analyze_log", path=path, keyword="connection", max_lines=200)])
     add("filter-3", f"找出{path}最近200行中出现ERROR的行，保留原文。",
@@ -241,7 +240,7 @@ def cases():
         [call("analyze_log", path=path, keyword="retry", max_lines=200)])
 
     add("summary-1", f"汇总{path}最近500行中的WARN和ERROR，给出错误摘要。",
-        [call("summarize_errors", path=path, max_lines=500)], split="dev")
+        [call("summarize_errors", path=path, max_lines=500)])
     add("summary-2", f"给{path}最近500行的警告与错误做一份归纳。",
         [call("summarize_errors", path=path, max_lines=500)])
     add("summary-3", f"Summarize WARN and ERROR records in the last 500 lines of {path}.",
@@ -256,7 +255,7 @@ def cases():
         [call("summarize_errors", path=path, max_lines=500)])
 
     # ================================================== 单工具：近似能力（8）
-    add("near-lines-1", f"统计{path}一共有多少行。", [call("count_log_lines", path=path)], split="dev")
+    add("near-lines-1", f"统计{path}一共有多少行。", [call("count_log_lines", path=path)])
     add("near-lines-2", f"读取{path}的全部内容，不要只读末尾几千行。", [call("read_entire_log", path=path)])
     add("near-lines-3", "把 /tmp/rag-eval/old.log 压缩成归档文件，不要分析里面的内容。",
         [call("archive_log", path="/tmp/rag-eval/old.log")])
@@ -274,13 +273,13 @@ def cases():
     add("gh-search-1", "在仓库 acme/backend 里搜索包含 retryWithBackoff 的代码。",
         [call("github_search_code", query="retryWithBackoff", repo="acme/backend")])
     add("gh-issue-1", "给 acme/backend 仓库新建一个 issue，标题为“登录超时”。",
-        [call("github_create_issue", repo="acme/backend", title="登录超时")], split="dev")
+        [call("github_create_issue", repo="acme/backend", title="登录超时")])
     add("slack-post-1", "在 Slack 的 #deploy 频道发一条消息：v1.4.2 已上线。",
         [call("slack_post_message", channel="#deploy", text="v1.4.2 已上线")])
     add("notion-search-1", "在 Notion 里搜索标题含“周会纪要”的页面。",
         [call("notion_search_pages", query="周会纪要")])
     add("fs-read-1", "读取本地文件 /data/config.json 的内容。",
-        [call("fs_read_file", path="/data/config.json")], split="dev")
+        [call("fs_read_file", path="/data/config.json")])
     add("fs-list-1", "列出 /tmp/rag-eval 目录下有哪些文件。",
         [call("fs_list_directory", path="/tmp/rag-eval")])
     add("pg-tables-1", "列出 Postgres 的 public schema 下有哪些表。",
@@ -303,7 +302,7 @@ def cases():
     # ================================================== 多工具（24）
     add("multi-1", f"查询北京的天气（纬度39.9，经度116.4），并读取{path}最后20行。",
         [weather("北京", "39.9", "116.4"), call("tail_log", path=path, lines=20)],
-        split="dev", kind="multi")
+        kind="multi")
     add("multi-2", f"获取北京天气（纬度39.9，经度116.4），同时汇总{path}最近500行的WARN和ERROR。",
         [weather("北京", "39.9", "116.4"), call("summarize_errors", path=path, max_lines=500)], kind="multi")
     add("multi-3", f"看{path}最后50行，并统计这个文件一共有多少行。",
@@ -327,11 +326,11 @@ def cases():
     add("multi-10", "给 acme/backend 建一个标题为“索引构建超时”的 issue，然后在 Slack 的 #infra 频道发一句“issue 已创建”。",
         [call("github_create_issue", repo="acme/backend", title="索引构建超时"),
          call("slack_post_message", channel="#infra", text="issue 已创建")],
-        split="dev", kind="multi")
+        kind="multi")
     add("multi-11", "看一下 Postgres 里 orders 表的结构，然后把结果发给 ops@example.com，主题写“orders 表结构”。",
         [call("postgres_describe_table", table="orders"),
          call("gmail_send_email", to="ops@example.com", subject="orders 表结构")],
-        split="dev", kind="multi")
+        kind="multi")
     add("multi-12", "在 Google Drive 搜“预算表”，然后把文件名发邮件给 finance@example.com，主题“预算表”。",
         [call("drive_search_files", query="预算表"),
          call("gmail_send_email", to="finance@example.com", subject="预算表")], kind="multi")
@@ -341,11 +340,11 @@ def cases():
     add("multi-14", "列出 Sentry 项目 backend 未解决的 issue，再读一下 PROJ-1234 的堆栈详情。",
         [call("sentry_list_issues", project="backend"),
          call("sentry_get_issue", issue_id="PROJ-1234")],
-        split="dev", kind="multi")
+        kind="multi")
     add("multi-15", "在 acme/backend 里搜 retryWithBackoff 的代码，把结果整理成 Notion 页面“检索结果”，父页面是 page-7f21。",
         [call("github_search_code", query="retryWithBackoff", repo="acme/backend"),
          call("notion_create_page", parent_id="page-7f21", title="检索结果")],
-        split="dev", kind="multi")
+        kind="multi")
     add("multi-16", "搜一下“MCP 工具检索 评测”，再抓取 https://example.com/blog/rag 这个页面的正文。",
         [call("web_search", query="MCP 工具检索 评测"),
          call("web_fetch_page", url="https://example.com/blog/rag")], kind="multi")
@@ -376,13 +375,13 @@ def cases():
         [weather("北京", "39.9", "116.4"), call("air_quality", city="北京")], kind="multi")
 
     # ================================================== 无工具（16）
-    add("no-tool-1", "你好，你能帮我做什么？", [], split="dev", kind="no_tool")
+    add("no-tool-1", "你好，你能帮我做什么？", [], kind="no_tool")
     add("no-tool-2", "解释一下 JSON-RPC 里的 id 字段是做什么用的。", [], kind="no_tool")
     add("no-tool-3", "把 hello world 翻译成中文。", [], kind="no_tool")
     add("no-tool-4", "1 加到 100 等于多少？", [], kind="no_tool")
-    add("no-tool-5", "讲一个和技术无关的简短笑话。", [], split="dev", kind="no_tool")
+    add("no-tool-5", "讲一个和技术无关的简短笑话。", [], kind="no_tool")
     add("no-tool-6", "什么是 MCP 协议？用两句话说明，不需要查资料。", [], kind="no_tool")
-    add("no-tool-7", "帮我写一句 Python 的 Hello World。", [], split="dev", kind="no_tool")
+    add("no-tool-7", "帮我写一句 Python 的 Hello World。", [], kind="no_tool")
     add("no-tool-8", "解释一下倒排索引是什么，口述即可。", [], kind="no_tool")
     add("no-tool-9", "把“今天的实验跑完了”翻译成英文。", [], kind="no_tool")
     add("no-tool-10", "2 的 10 次方是多少？", [], kind="no_tool")

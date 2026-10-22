@@ -84,10 +84,8 @@ class ScoringTests(unittest.TestCase):
     def test_cases_and_catalogs_have_distinct_capabilities(self):
         suite = cases()
         self.assertEqual(len(suite), 80)
-        self.assertEqual(sum(c["split"] == "dev" for c in suite), 15)
         kinds = Counter(c["kind"] for c in suite)
         self.assertEqual((kinds["single"], kinds["multi"], kinds["no_tool"]), (40, 24, 16))
-        self.assertTrue(any(c["kind"] == "multi" and c["split"] == "dev" for c in suite))
         base = [definition(name, name, {}, []) for name in ("get_weather", "tail_log", "analyze_log", "summarize_errors")]
         groups = catalogs(base, [50, 100, 300])
         self.assertEqual([len(g) for g in groups], [4, 50, 100, 300])
@@ -155,8 +153,11 @@ class BackendTests(unittest.TestCase):
                 bridge.request({"op": "reset_query_cache"})
                 cold = bridge.request({"op": "retrieve", "query": "北京天气", "k": 1})
                 self.assertEqual(cold["cache_misses"], 1)
-                with self.assertRaisesRegex(RuntimeError, "smaller"):
-                    bridge.request({"op": "retrieve", "query": "北京天气", "k": 4})
+                # k 超过目录大小时按全量返回：4 个工具、k=10 仍应拿到 4 个
+                full = bridge.request({"op": "retrieve", "query": "北京天气", "k": 10})
+                self.assertEqual(len(full["tools"]), 4)
+                with self.assertRaisesRegex(RuntimeError, "positive"):
+                    bridge.request({"op": "retrieve", "query": "北京天气", "k": 0})
             finally:
                 bridge.close()
 
@@ -177,7 +178,7 @@ class BackendTests(unittest.TestCase):
     def test_complete_driver_reports_are_explicitly_fixture_only(self):
         with tempfile.TemporaryDirectory() as directory, local_api() as (_, url), patch.dict(os.environ, {"DASHSCOPE_API_KEY": "offline-fixture"}):
             args = types.SimpleNamespace(quick=False, repeats=2, model="fixture", embedding_model="fixture",
-                                         dimension=8, threshold=0.3, sizes=[50, 100, 300], k_values=[1, 3, 5],
+                                         dimension=8, threshold=0.3, sizes=[50, 100, 300], k=10,
                                          chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3, fixture=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 code = evaluate(args, Path(os.environ["RAG_EVAL_BACKEND"]), Path(os.environ["RAG_EVAL_SERVER"]),
@@ -188,8 +189,11 @@ class BackendTests(unittest.TestCase):
             self.assertEqual([s["size"] for s in data["stages"]], [4, 50, 100, 300])
             expected = sum(s["test_cases"] * 2 * args.repeats for s in data["stages"])
             self.assertEqual(len(data["records"]), expected)
-            self.assertTrue(all(s["query_misses"] == s["test_cases"] and s["query_hits"] == 0
-                                for s in data["stages"]))
+            for stage in data["stages"]:
+                # k 不小于目录大小时走退化分支，不产生查询向量
+                expected_misses = stage["test_cases"] if stage["k"] < stage["size"] else 0
+                self.assertEqual(stage["query_misses"], expected_misses)
+                self.assertEqual(stage["query_hits"], 0)
             self.assertTrue(all(r["query_cache_misses"] == 0 for r in data["records"] if r["repeat"] == 2))
             # 结果目录里只留一个中文报告
             self.assertEqual([p.name for p in Path(directory).iterdir() if p.is_file()], ["report.md"])

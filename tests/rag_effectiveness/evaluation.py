@@ -124,7 +124,6 @@ def number(value, suffix=""):
 
 def report(data, directory):
     kinds = Counter(c["kind"] for c in data["cases"])
-    dev = sum(c["split"] == "dev" for c in data["cases"])
     lines = ["# RAG 工具筛选对照", "",
              f"状态：{data['status']}"]
     if data.get("evidence") == "fixture":
@@ -132,26 +131,26 @@ def report(data, directory):
     lines += [f"模型：{data['config']['model']}｜Embedding：{data['config']['embedding_model']}"
               f"｜重复 {data['config']['repeats']} 次｜相似度阈值 {data['config']['threshold']}", "",
              "## 1. 题目与目录", "",
-             f"{len(data['cases'])} 题（开发 {dev} / 测试 {len(data['cases']) - dev}）："
-             f"{kinds['single']} 单工具、{kinds['multi']} 多工具、{kinds['no_tool']} 无需工具。"]
+             f"{len(data['cases'])} 题：{kinds['single']} 单工具、{kinds['multi']} 多工具、"
+             f"{kinds['no_tool']} 无需工具。"]
 
     sizes = [str(s["size"]) for s in data["stages"]]
     skipped = [f"{s['size']} 工具目录：{s.get('cases', 0)} 题参与" +
                (f"，跳过 {s['skipped']} 题（所需工具不在该目录内）" if s.get("skipped") else "") for s in data["stages"]]
     lines += [f"工具目录：{' / '.join(sizes)}。"] + [f"- {s}" for s in skipped]
 
-    lines += ["", "## 2. 检索有没有漏工具（测试集）", "",
-              "| 目录 | 选用 k | 完整命中率 | 平均召回率 |", "|---:|---:|---:|---:|"]
+    lines += ["", "## 2. 检索有没有漏工具", "",
+              "| 目录 | k | 完整命中率 | 平均召回率 |", "|---:|---:|---:|---:|"]
     for stage in data["stages"]:
-        metric = stage["retrieval_metrics"].get(str(stage["chosen_k"]), {})
-        lines.append(f"| {stage['size']} | {stage['chosen_k']} | {percent(metric.get('test_complete'))} "
-                     f"| {percent(metric.get('test_recall'))} |")
+        metric = stage["retrieval"]
+        lines.append(f"| {stage['size']} | {stage['k']} | {percent(metric.get('complete'))} "
+                     f"| {percent(metric.get('recall'))} |")
 
     lines += ["", "## 3. 全量工具 vs RAG 筛选", "",
               "| 目录 | 方式 | 调用正确率 | 工具选择正确率 | 平均输入 token |",
               "|---:|---|---:|---:|---:|"]
     for stage in data["stages"]:
-        for arm, label in (("all", "全量"), ("rag", f"RAG k={stage['chosen_k']}")):
+        for arm, label in (("all", "全量"), ("rag", f"RAG k={stage['k']}")):
             row = stage["summary"][arm]
             lines.append(f"| {stage['size']} | {label} | {percent(row['accuracy'])} "
                          f"| {percent(row['selection_accuracy'])} | {number(row['prompt_tokens'])} |")
@@ -198,9 +197,9 @@ def console(data, directory):
     print(f"\n========== RAG 工具筛选对照 ==========\n状态：{data['status']}")
     for stage in data["stages"]:
         base, rag = stage["summary"]["all"], stage["summary"]["rag"]
-        metric = stage["retrieval_metrics"].get(str(stage["chosen_k"]), {})
-        print(f"\n[{stage['size']} 个工具，k={stage['chosen_k']}，{stage.get('cases', 0)} 题]")
-        print(f"  检索完整命中率 {percent(metric.get('test_complete'))}，平均召回 {percent(metric.get('test_recall'))}")
+        metric = stage["retrieval"]
+        print(f"\n[{stage['size']} 个工具，k={stage['k']}，{stage.get('cases', 0)} 题]")
+        print(f"  检索完整命中率 {percent(metric.get('complete'))}，平均召回 {percent(metric.get('recall'))}")
         print(f"  全量：调用正确率 {percent(base['accuracy'])}，token {number(base['prompt_tokens'])}")
         print(f"  RAG ：调用正确率 {percent(rag['accuracy'])}，token {number(rag['prompt_tokens'])}")
     print(f"\n报告：{Path(directory) / 'report.md'}")
