@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from dataset import cases, catalogs
+from dataset import cases, catalogs, synthetic_tools
 from evaluation import aggregate, console, coverage, mean, report, score
 
 HERE = Path(__file__).resolve().parent
@@ -110,7 +110,8 @@ def ask_model(key, model, url, question, tools, timeout):
 def evaluate(args, executable, server, plugins, directory):
     suite = cases()
     if args.quick:
-        chosen = {"weather-2", "tail-2", "filter-2", "summary-2", "multi-2", "no-tool-2"}
+        chosen = {"weather-2", "tail-2", "filter-2", "summary-2", "gh-search-1", "slack-post-1",
+                  "fs-list-1", "web-search-1", "multi-3", "multi-7", "no-tool-2", "no-tool-4"}
         suite = [c for c in suite if c["split"] == "dev" or c["id"] in chosen]
     data = {"status": "进行中", "evidence": "fixture" if getattr(args, "fixture", False) else "live", "config": {
         "model": args.model, "embedding_model": args.embedding_model,
@@ -123,8 +124,10 @@ def evaluate(args, executable, server, plugins, directory):
         real = bridge.request({"op": "discover", "server": str(server), "plugins": str(plugins), "logs": str(directory)})["tools"]
         names = {t["name"] for t in real}
         required = {c["name"] for case in suite for c in case["expected_calls"]}
-        if not required <= names:
-            raise RuntimeError(f"实际插件缺少标注工具：{sorted(required - names)}")
+        # 标注既可能指向真实插件工具，也可能指向纯元数据的空壳工具（不执行、只评分）。
+        unknown = required - names - {t["name"] for t in synthetic_tools()}
+        if unknown:
+            raise RuntimeError(f"标注引用了目录中不存在的工具：{sorted(unknown)}")
         data["real_tool_names"] = sorted(names)
         data["catalogs"] = []
         sizes = [50] if args.quick else args.sizes
@@ -142,7 +145,12 @@ def evaluate(args, executable, server, plugins, directory):
                                       "index_path": str(directory / "tool_index.json")})
             retrieval, warm = {}, {}
             metrics = {}
-            development = [c for c in suite if c["split"] == "dev"]
+            # 基线目录只有 4 个真实工具，跨应用题的预期工具不在其中；这类题跳过，
+            # 不记成失败，也不参与该目录的检索指标。
+            stage_names = {t["name"] for t in tools}
+            stage_suite = [c for c in suite
+                           if {call["name"] for call in c["expected_calls"]} <= stage_names]
+            development = [c for c in stage_suite if c["split"] == "dev"]
             for case in development:
                 retrieval[case["id"]] = bridge.request({"op": "retrieve", "query": case["question"], "k": max(ks)})
             def dev_key(k):
@@ -150,7 +158,7 @@ def evaluate(args, executable, server, plugins, directory):
                 return (mean([int(v[1]) for v in values if v[1] is not None]), mean([v[0] for v in values]), -k)
             chosen_k = max(ks, key=dev_key)
             bridge.request({"op": "reset_query_cache"})
-            test = [c for c in suite if c["split"] == "test"]
+            test = [c for c in stage_suite if c["split"] == "test"]
             for i, case in enumerate(test):
                 first = bridge.request({"op": "retrieve", "query": case["question"], "k": chosen_k})
                 warm[case["id"]] = bridge.request({"op": "retrieve", "query": case["question"], "k": chosen_k})
@@ -167,7 +175,7 @@ def evaluate(args, executable, server, plugins, directory):
                     print(f"  测试集检索进度：{i+1}/{len(test)}", flush=True)
             for k in ks:
                 values = []
-                for case in suite:
+                for case in stage_suite:
                     subset = retrieval[case["id"]]["tools"][:k]
                     recall, complete = coverage(case, [t["name"] for t in subset])
                     values.append((case["split"], recall, complete, len(subset)))
@@ -178,11 +186,13 @@ def evaluate(args, executable, server, plugins, directory):
                     "test_recall": mean([v[1] for v in values if v[0] == "test"]),
                     "candidates": mean([v[3] for v in values if v[0] == "test"])}
             stage = {"size": size, "chosen_k": chosen_k, "index": indexed, "retrieval_metrics": metrics,
+                     "cases": len(stage_suite), "skipped": len(suite) - len(stage_suite),
                      "retrieval_first_ms": mean([retrieval[c["id"]]["retrieval_ms"] for c in test]),
                      "retrieval_warm_ms": mean([r["retrieval_ms"] for r in warm.values()]),
                      "query_misses": sum(retrieval[c["id"]]["cache_misses"] for c in test),
                      "query_hits": sum(retrieval[c["id"]]["cache_hits"] for c in test), "queries": retrieval}
-            print(f"  开发集选定k={chosen_k}；[4/4] {len(test)}题 × 两组 × {args.repeats}次真实模型对照。", flush=True)
+            print(f"  开发集选定k={chosen_k}；本目录 {len(stage_suite)} 题参与（跳过 {stage['skipped']} 题："
+                  f"所需工具不在该目录内）；[4/4] {len(test)}题 × 两组 × {args.repeats}次真实模型对照。", flush=True)
             records = []
             for repeat in range(1, args.repeats + 1):
                 for i, case in enumerate(test):
@@ -231,7 +241,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--self-test", action="store_true", help="离线自检，不调用真实API，不产生效果结论")
     mode.add_argument("--live", action="store_true", help="调用真实Embedding/模型API进行对照")
-    parser.add_argument("--quick", action="store_true", help="小规模在线试跑：6个测试问题，基线+50工具")
+    parser.add_argument("--quick", action="store_true", help="小规模在线试跑：12个测试问题，基线+50工具")
     parser.add_argument("--model", default="qwen-plus")
     parser.add_argument("--embedding-model", default="text-embedding-v2")
     parser.add_argument("--dimension", type=int, default=1536)

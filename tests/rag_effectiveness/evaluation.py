@@ -129,9 +129,9 @@ def report(data, directory):
              "## 1. 测试了什么", "",
              f"- 模型：`{data['config']['model']}`；Embedding：`{data['config']['embedding_model']}`。",
              f"- {len(data['cases'])} 个标注问题：{sum(c['split'] == 'dev' for c in data['cases'])} 个开发问题用于选 k，{sum(c['split'] == 'test' for c in data['cases'])} 个测试问题用于最终对照。重复次数：{data['config']['repeats']}。",
-             "- 基线目录通过真实 MCP 服务端发现天气、日志两个插件的工具；50/100 工具目录增加模拟工具定义。",
+             "- 基线目录通过真实 MCP 服务端发现天气、日志两个插件的工具；50/100 工具目录追加近似干扰项、热门 MCP 空壳工具和批量生成的业务工具定义。",
              "- 本报告评测检索及模型首轮工具选择、参数生成；不执行业务API，不代表最终任务成功率。",
-             "- 模拟项是功能不同的工具定义，包含天气/日志近似功能与其他业务工具；不是已实现的插件。",
+             "- 模拟项是功能不同的工具定义，跨应用题目的预期工具也是空壳；评分只比对 tool_calls，不执行工具。",
              "- k 只在开发集上选择；测试集不参与调参。温度固定为0，两组请求交替先后。",
              "", "## 2. 检索有没有漏掉工具", "",
              "完整命中率：问题所需的所有工具都在候选中。平均召回率：每题找回的必要工具占比。无需工具的问题不计入这两项。",
@@ -155,6 +155,11 @@ def report(data, directory):
             label = "全量" if arm == "all" else f"RAG k={stage['chosen_k']}"
             lines.append(f"|{stage['size']}|{label}|{row['valid']}/{row['requests']}|{percent(row['selection_accuracy'])}|"
                          f"{percent(row['accuracy'])}|{number(row['prompt_tokens'])}|{number(row['model_ms'], 'ms')}|{number(row['total_ms'], 'ms')}|")
+    lines += ["", "各目录参与对照的题数（基线目录只有 4 个真实工具，跨应用题跳过；"
+              "准确率只在同一目录内两组之间可比）：", ""]
+    for stage in data["stages"]:
+        lines.append(f"- {stage['size']} 个工具：{stage.get('cases', 0)} 题参与，"
+                     f"跳过 {stage.get('skipped', 0)} 题（所需工具不在该目录内）。")
     lines += ["", "## 4. 缓存、额外开销与收益", ""]
     for stage in data["stages"]:
         a, b = stage["summary"]["all"], stage["summary"]["rag"]
@@ -199,7 +204,8 @@ def console(data, directory):
     print(f"\n========== RAG效果对照：{title} ==========")
     print("评测范围：检索、工具选择、参数生成；不含业务API执行。")
     for stage in data["stages"]:
-        print(f"\n[{stage['size']}个工具，开发集选定 k={stage['chosen_k']}]")
+        print(f"\n[{stage['size']}个工具，开发集选定 k={stage['chosen_k']}，"
+              f"{stage.get('cases', 0)} 题参与，跳过 {stage.get('skipped', 0)} 题]")
         for arm in ("all", "rag"):
             row = stage["summary"][arm]
             label = "全量工具" if arm == "all" else "RAG筛选"
