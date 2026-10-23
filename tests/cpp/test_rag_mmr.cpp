@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -47,6 +48,33 @@ int main() {
                 "MMR should retain relevance while reducing redundant candidates");
         require(std::abs(diverse[1].similarity - std::sqrt(0.5f)) < 1e-5f,
                 "returned score must remain original cosine, not MMR score");
+
+        // Same controlled geometry, different needs/budgets: include failures too.
+        // These hand-built vectors demonstrate behavior, not real embedding quality.
+        std::cout << "Controlled vectors only; not live retrieval accuracy.\n"
+                  << "Scenario | K | Pool | Ordinary complete | MMR complete\n";
+        auto scenario = [&](const char* label, const std::set<std::string>& required,
+                            int k, int fetch_k, bool expected_plain, bool expected_mmr) {
+            MMRConfig config = mmr;
+            config.fetch_k = fetch_k;
+            auto complete = [&](const std::vector<SearchResult>& results) {
+                std::set<std::string> selected;
+                for (const auto& result : results) selected.insert(result.tool.name);
+                for (const auto& name : required)
+                    if (!selected.count(name)) return false;
+                return true;
+            };
+            const bool plain_hit = complete(index.search(query, k));
+            const bool mmr_hit = complete(index.searchMMR(query, k, config));
+            require(plain_hit == expected_plain && mmr_hit == expected_mmr, label);
+            std::cout << label << " | " << k << " | " << fetch_k << " | "
+                      << (plain_hit ? "yes" : "no") << " | " << (mmr_hit ? "yes" : "no") << '\n';
+        };
+        scenario("Redundant candidates crowd out another need", {"weather", "log"}, 2, 3, false, true);
+        scenario("Required tool outside candidate pool", {"weather", "log"}, 2, 2, false, false);
+        scenario("Both similar tools are required", {"weather", "weather_history"}, 2, 3, true, false);
+        scenario("Single strongest tool is enough", {"weather"}, 2, 3, true, true);
+        scenario("Enough slots for every tool", {"weather", "weather_history", "log"}, 3, 3, true, true);
 
         mmr.lambda = 1.0f;
         require(names(index.searchMMR(query, 2, mmr)) == names(ordinary),

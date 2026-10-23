@@ -17,6 +17,7 @@ import uuid
 
 from dataset import cases, catalogs, synthetic_tools
 from evaluation import aggregate, console, coverage, mean, report, score
+import mmr_dataset
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -167,6 +168,26 @@ def retrieval_misses(suite, queries, selection, k, fetch_k):
     return misses
 
 
+def scenario_comparison(suite, baseline, selected):
+    """Count paired gains AND regressions; an unchanged total can hide both."""
+    rows = []
+    for scenario, label in mmr_dataset.SCENARIOS.items():
+        group = [case for case in suite if case.get("scenario") == scenario]
+        before, after = retrieval_metrics(group, baseline), retrieval_metrics(group, selected)
+        gains, losses = [], []
+        for case in group:
+            def complete(queries):
+                return coverage(case, [tool["name"] for tool in queries[case["id"]]["tools"]])[1]
+            old, new = complete(baseline), complete(selected)
+            if not old and new:
+                gains.append(case["id"])
+            if old and not new:
+                losses.append(case["id"])
+        rows.append({"scenario": scenario, "label": label, "baseline": before, "selected": after,
+                     "gained_ids": gains, "lost_ids": losses})
+    return rows
+
+
 def evaluate(args, executable, server, plugins, directory, log_dir):
     selection = getattr(args, "selection", "similarity")
     retrieval_only = getattr(args, "retrieval_only", False)
@@ -175,7 +196,8 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                         "mmr_lambda": getattr(args, "mmr_lambda", 0.7),
                         "hybrid_fetch_k": getattr(args, "hybrid_fetch_k", 50),
                         "rrf_k": getattr(args, "rrf_k", 60)}
-    suite = cases()
+    suite_name = getattr(args, "suite", "standard")
+    suite = mmr_dataset.cases() if suite_name == "mmr-stress" else cases()
     if args.quick:
         chosen = {"weather-2", "tail-2", "filter-2", "summary-2", "gh-search-1", "slack-post-1",
                   "fs-list-1", "web-search-1", "multi-3", "multi-7", "no-tool-2", "no-tool-4"}
@@ -183,7 +205,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
     data = {"status": "进行中", "evidence": "fixture" if getattr(args, "fixture", False) else "live", "config": {
         "model": args.model, "embedding_model": args.embedding_model,
         "repeats": args.repeats, "quick": args.quick,
-        "retrieval_only": retrieval_only, **selection_config,
+        "retrieval_only": retrieval_only, "suite": suite_name, **selection_config,
         "chat_url": args.chat_url, "embedding_url": args.embedding_url},
         "cases": suite, "stages": [], "records": [], "started_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     bridge = Bridge(executable, log_dir)
@@ -199,7 +221,8 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
         data["real_tool_names"] = sorted(names)
         data["catalogs"] = []
         sizes = [50] if args.quick else args.sizes
-        for tools in catalogs(real, sizes):
+        make_catalogs = mmr_dataset.catalogs if suite_name == "mmr-stress" else catalogs
+        for tools in make_catalogs(real, sizes):
             size = len(tools)
             k = min(args.k, size)  # 工具数不超过 k 时，RAG 退化为全量
             data["catalogs"].append({"size": size, "tools": tools,
@@ -248,6 +271,8 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                 stage["baseline_queries"] = baseline
                 stage["baseline_misses"] = retrieval_misses(stage_suite, baseline, "similarity", k,
                                                              selection_config["mmr_fetch_k"])
+                if suite_name == "mmr-stress":
+                    stage["scenario_comparison"] = scenario_comparison(stage_suite, baseline, retrieval)
             if retrieval_only:
                 data["stages"].append(stage)
                 data["status"] = "完成：仅检索，未调用对话模型"
@@ -315,6 +340,8 @@ def main():
     mode.add_argument("--live", action="store_true", help="调用真实Embedding/模型API进行对照")
     mode.add_argument("--retrieval-only", action="store_true", help="只调用真实Embedding，比较工具召回，不调用对话模型")
     parser.add_argument("--quick", action="store_true", help="小规模在线试跑：12个测试问题，基线+50工具")
+    parser.add_argument("--suite", choices=("standard", "mmr-stress"), default="standard",
+                        help="默认原80题；mmr-stress为独立18题，需搭配仅检索MMR模式")
     parser.add_argument("--model", default="qwen-plus")
     parser.add_argument("--chat-key-env", default="DASHSCOPE_API_KEY",
                         help="对话模型密钥所在的环境变量名；Embedding 仍用 DASHSCOPE_API_KEY")
@@ -338,6 +365,8 @@ def main():
     args = parser.parse_args()
     if os.name != "posix":
         parser.error("项目使用POSIX进程通信，请在Linux或WSL中运行")
+    if args.suite == "mmr-stress" and (not args.retrieval_only or args.selection != "mmr" or args.quick):
+        parser.error("MMR专项请使用 --retrieval-only --selection mmr，不支持 --quick")
     if args.repeats < 1 or args.timeout < 1 or args.jobs < 1 or args.dimension < 1:
         parser.error("次数、超时、线程数、维度必须为正")
     if args.k < 1 or any(n < 1 for n in args.sizes):

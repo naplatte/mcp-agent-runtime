@@ -72,6 +72,10 @@ def report(data, directory):
         lines.append("**模拟接口自检：以下数据不能作为真实 RAG 效果结论。**")
     lines += [f"模型：{config['model']}｜Embedding：{config['embedding_model']}｜RAG：{label}",
               f"{len(data['cases'])} 题，重复 {config['repeats']} 次。", ""]
+    if config.get("suite") == "mmr-stress":
+        lines += ["**MMR专项压力测试：独立18题，含密集相似工具；不与原80题混合统计，也不代表日常请求分布。**",
+                  f"最终 K={data['stages'][0]['k'] if data['stages'] else '未测得'}，"
+                  f"候选池={config['mmr_fetch_k']}，相关性权重={config['mmr_lambda']}。", ""]
     if config.get("retrieval_only"):
         lines += ["仅检索：没有调用对话模型，模型工具选择命中率和输入 token 未测量。", ""]
         comparison = selection in ("mmr", "hybrid")
@@ -88,6 +92,17 @@ def report(data, directory):
             else:
                 lines.append(f"| {stage['size']} | {current} | {stage['k']} |")
         lines += ["", "工具找齐只统计需要工具的题；多工具题必须全部找到。"]
+        if config.get("suite") == "mmr-stress":
+            lines += ["", "| 工具总数 | 测试情况 | 普通向量：找齐题数 | MMR：找齐题数 | MMR补回 | MMR弄丢 |",
+                      "|---:|---|---:|---:|---:|---:|"]
+            for stage in data["stages"]:
+                for row in stage["scenario_comparison"]:
+                    before, after = row["baseline"], row["selected"]
+                    lines.append(f"| {stage['size']} | {row['label']} | {before['hits']}/{before['required']} "
+                                 f"| {after['hits']}/{after['required']} | {len(row['gained_ids'])} | {len(row['lost_ids'])} |")
+            lines += ["", "补回＝普通向量没找齐、MMR找齐；弄丢＝普通向量找齐、MMR没找齐。",
+                      "相似工具都需要的题用于观察去重复是否误伤；专项不预设MMR一定胜出。",
+                      "两组使用相同目录、问题、查询向量和最终K，正确答案只用于事后评分。"]
     else:
         lines += ["命中率只看工具是否全部选对，不漏选、不多选、不重复；忽略参数错误。无需工具的题不调用工具即算对。",
                   "括号为选对题数／有效题数；平均输入 token 来自接口实际用量。", "",

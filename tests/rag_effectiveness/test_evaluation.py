@@ -16,6 +16,7 @@ from dataset import cases, catalogs, definition, text
 from evaluation import aggregate, coverage, report, score
 from run import Bridge, evaluate, retrieval_misses
 import run
+import mmr_dataset
 
 
 def fixture_vector(value):
@@ -81,6 +82,52 @@ def local_api():
 
 
 class ScoringTests(unittest.TestCase):
+    def test_mmr_stress_cases_keep_original_suite_and_labels_separate(self):
+        suite = mmr_dataset.cases()
+        self.assertEqual(len(suite), 18)
+        self.assertEqual(Counter(c['scenario'] for c in suite),
+                         {scenario: 6 for scenario in mmr_dataset.SCENARIOS})
+        self.assertEqual({len(c['expected_calls']) for c in suite}, {1, 2, 3})
+        self.assertTrue({c['id'] for c in suite}.isdisjoint(c['id'] for c in cases()))
+        base = [definition(name, name, {}, []) for name in
+                ('get_weather', 'tail_log', 'analyze_log', 'summarize_errors')]
+        groups = mmr_dataset.catalogs(base, [50, 100, 300])
+        self.assertEqual([len(group) for group in groups], [50, 100, 300])
+        self.assertEqual(groups[1][:50], groups[0])
+        self.assertEqual(groups[2][:100], groups[1])
+        required = {call['name'] for case in suite for call in case['expected_calls']}
+        for group in groups:
+            names = [tool['name'] for tool in group]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertTrue(required <= set(names))
+        self.assertEqual(len(cases()), 80)
+        self.assertGreater(sum(t['name'].startswith('weather_') for t in groups[1]),
+                           sum(t['name'].startswith('weather_') for t in groups[0]))
+
+    def test_mmr_stress_report_counts_both_gains_and_regressions(self):
+        suite = mmr_dataset.cases()
+        def response(case, hit):
+            names = [call['name'] for call in case['expected_calls']] if hit else []
+            return {'tools': [{'name': name} for name in names]}
+        before = {case['id']: response(case, case['id'] != 'crowded-1') for case in suite}
+        after = {case['id']: response(case, case['id'] != 'similar-1') for case in suite}
+        comparison = run.scenario_comparison(suite, before, after)
+        self.assertEqual(comparison[0]['gained_ids'], ['crowded-1'])
+        self.assertEqual(comparison[2]['lost_ids'], ['similar-1'])
+        stage = {'size': 50, 'k': 5, 'retrieval': run.retrieval_metrics(suite, after),
+                 'baseline_retrieval': run.retrieval_metrics(suite, before), 'scenario_comparison': comparison}
+        data = {'status': '完成：仅检索', 'cases': suite, 'config': {
+            'suite': 'mmr-stress', 'selection': 'mmr', 'retrieval_only': True, 'model': 'fixture',
+            'embedding_model': 'fixture', 'repeats': 1, 'mmr_fetch_k': 30, 'mmr_lambda': 0.7},
+            'stages': [stage]}
+        with tempfile.TemporaryDirectory() as directory:
+            report(data, directory)
+            rendered = (Path(directory) / 'report.md').read_text(encoding='utf-8')
+        self.assertIn('不与原80题混合统计', rendered)
+        self.assertIn('MMR补回 | MMR弄丢', rendered)
+        self.assertIn('| 50 | 跨领域多需求 | 5/6 | 6/6 | 1 | 0 |', rendered)
+        self.assertIn('| 50 | 相似工具都需要 | 6/6 | 5/6 | 0 | 1 |', rendered)
+
     def test_miss_diagnostics_distinguish_pool_and_selection(self):
         case = {"id": "fixture", "kind": "single", "question": "fixture",
                 "expected_calls": [{"name": "target", "arguments": {}}]}
@@ -170,6 +217,36 @@ class ScoringTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("RAG_EVAL_BACKEND"), "Build the C++ backend using run.py --self-test")
 class BackendTests(unittest.TestCase):
+    def test_mmr_stress_driver_uses_real_cpp_and_cached_vector_for_both_arms(self):
+        with tempfile.TemporaryDirectory() as directory, local_api() as (api, url), \
+                patch.dict(os.environ, {'DASHSCOPE_API_KEY': 'offline-fixture'}):
+            args = types.SimpleNamespace(suite='mmr-stress', quick=False, repeats=1, model='fixture',
+                                         embedding_model='fixture', dimension=8, sizes=[50, 100], k=5,
+                                         selection='mmr', mmr_fetch_k=30, mmr_lambda=0.7,
+                                         retrieval_only=True, fixture=True, chat_url=url + '/chat',
+                                         embedding_url=url + '/embedding', timeout=3)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = evaluate(args, Path(os.environ['RAG_EVAL_BACKEND']), Path(os.environ['RAG_EVAL_SERVER']),
+                                Path(os.environ['RAG_EVAL_PLUGINS']), Path(directory), Path(directory) / 'logs')
+            self.assertEqual(code, 0)
+            data = run.LAST_RUN
+            self.assertEqual(len(data['cases']), 18)
+            self.assertFalse(any(path == '/chat' for path, _ in api.requests))
+            self.assertEqual(data['records'], [])
+            for stage in data['stages']:
+                self.assertEqual(stage['cases'], 18)
+                self.assertEqual(stage['query_misses'], 18)
+                self.assertEqual(len(stage['scenario_comparison']), 3)
+                for query in stage['queries'].values():
+                    self.assertEqual(len(query['tools']), 5)
+            requests = [request for path, request in api.requests if path == '/embedding']
+            # One query embedding per question and catalog, including the paired baseline.
+            questions = {case['question'] for case in data['cases']}
+            self.assertEqual(sum(value in questions for request in requests
+                                 for value in request['input']['texts']), 36)
+            persisted = json.loads((Path(directory) / 'logs' / 'evaluation_details.json').read_text(encoding='utf-8'))
+            self.assertIn('scenario_comparison', persisted['stages'][0])
+
     def test_hybrid_recovers_keyword_tool_and_rebuilds_after_reload_without_extra_embedding(self):
         with tempfile.TemporaryDirectory() as directory, local_api() as (api, url):
             bridge = Bridge(os.environ["RAG_EVAL_BACKEND"], directory)
