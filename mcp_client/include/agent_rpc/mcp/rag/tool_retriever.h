@@ -11,6 +11,7 @@
 #include "embedding_service.h"
 #include "embedding_cache.h"
 #include "vector_index.h"
+#include "keyword_index.h"
 #include "../mcp_agent_integration.h"
 
 #include <string>
@@ -34,6 +35,7 @@ struct RetrieverConfig {
     std::string index_path;               ///< 索引文件路径
     bool auto_save_index = true;          ///< 是否自动保存索引
     MMRConfig mmr;                        ///< 可选 MMR，默认候选池 30、权重 0.7
+    HybridConfig hybrid;                  ///< 可选向量 + 关键词融合，不增加远程请求
 };
 
 /**
@@ -149,6 +151,11 @@ public:
     // 覆盖本次查询的选择策略，复用同一索引和查询向量缓存。
     std::vector<RetrievedTool> retrieve(const std::string& query, int top_k, const MMRConfig& mmr,
                                       std::vector<RetrievedTool>* ranking = nullptr);
+
+    std::vector<RetrievedTool> retrieve(const std::string& query, int top_k, const MMRConfig& mmr,
+                                      const HybridConfig& hybrid,
+                                      std::vector<RetrievedTool>* ranking = nullptr,
+                                      std::vector<KeywordMatch>* keyword_ranking = nullptr);
     
     /**
      * @brief 获取所有工具（不进行检索）
@@ -195,11 +202,13 @@ private:
      * @brief 构建工具的文本表示（用于向量化）
      */
     static std::string buildToolText(const ToolInfo& tool);
+    void rebuildKeywordIndex();
     
     RetrieverConfig config_;
     std::unique_ptr<EmbeddingService> embedding_service_;
     std::unique_ptr<EmbeddingCache> cache_;
     std::unique_ptr<VectorIndex> index_;
+    std::unique_ptr<KeywordIndex> keyword_index_;
     bool initialized_ = false;
 };
 

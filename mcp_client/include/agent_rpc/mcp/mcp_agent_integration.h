@@ -39,6 +39,9 @@ struct RAGConfig {
     bool enable_mmr = false;                  // 是否使用 MMR 选择候选
     int mmr_fetch_k = 30;                      // MMR 候选池上限
     float mmr_lambda = 0.7f;                  // MMR 相关性权重
+    bool enable_hybrid = false;              // 向量 + 本地关键词倒排
+    int hybrid_fetch_k = 50;                  // 每路候选上限
+    int hybrid_rrf_k = 60;                    // 融合常数，不是返回工具数量
 };
 
 // MCP Agent 集成配置

@@ -30,14 +30,12 @@ python3 tests/rag_effectiveness/run.py --retrieval-only --selection mmr --k 10 -
 
 这会评测同一批 80 题和 50/100/300 三档目录，同时计算“普通排序选10个”和“MMR选10个”的完整召回。两种方法复用相同问题、目录和缓存的查询向量，普通排序对照不增加 Embedding 请求。
 
-输出仍为 `tests/rag_effectiveness/results/live-日期-编号/report.md`，包括：
+输出仍为 `tests/rag_effectiveness/results/live-日期-编号/report.md`。
+仅检索报告简要比较普通向量与 MMR 把工具找齐的题数，不提供模型选择命中率。
+详细排名、遗漏原因及耗时保存在构建日志目录的 `evaluation_details.json`。
+诊断查询包含额外的本地完整排名计算，不能直接当作未开启诊断的生产耗时。
 
-1. 两种方法分别把多少道题的必需工具给齐，多工具题单独列出。
-2. 平均实际候选数量；有效工具足够时选满 K 个，有效工具不足时全部返回。
-3. 首次查询与缓存命中时的耗时。开启诊断的首次查询包含额外的本地完整排名计算，不能直接当作未开启诊断的生产耗时。
-4. 漏工具原因汇总和逐题表：问题、正确工具、原始分数、原始排名及未选中的阶段原因。
-
-仅检索模式不会生成“最终调用正确率”和“聊天输入 token”结论；缺少 Embedding 密钥返回 77，不能当作通过。
+仅检索模式不会生成模型选择和聊天输入 token 结论；缺少 Embedding 密钥返回 77，不能当作通过。
 
 ## 再测模型选择和输入量
 
@@ -47,13 +45,15 @@ python3 tests/rag_effectiveness/run.py --retrieval-only --selection mmr --k 10 -
 python3 tests/rag_effectiveness/run.py --live --selection mmr --k 10 --mmr-fetch-k 30 --mmr-lambda 0.7 --repeats 3
 ```
 
-这个模式比较“全量工具”和“MMR筛选工具”的模型调用，同时展示普通排序与 MMR 的检索召回对照。它不运行普通排序候选的聊天模型组，因此不能据此直接声称 MMR 的模型调用正确率高于普通筛选；需要时另跑 `--selection similarity` 保持其他条件一致。
+这个模式的主报告只比较“全量工具”和“MMR筛选工具”的工具名称选择命中率及平均输入 token，不检查参数。
+它不运行普通向量候选的聊天模型组，因此不能直接声称 MMR 优于普通筛选；
+需要时另跑 `--selection similarity`，保持其他条件一致。
 
 工具定义、题目标签、最终模型提示词均未因 MMR 修改。小于等于最终 K 的目录沿用评测后端原有“返回全部工具”分支，不进行 MMR 筛选。
 
 ## 漏工具原因怎么看
 
-| 报告中的原因 | 含义 |
+| 详细记录中的原因 | 含义 |
 |---|---|
 | 排名超过候选池上限 | 没有进入 MMR 的前30个候选 |
 | 进入候选池，但 MMR 未选入 | 工具已经可供 MMR 选择，但没有进入最终10个 |

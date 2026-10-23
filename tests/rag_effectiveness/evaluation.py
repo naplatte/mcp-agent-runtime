@@ -1,96 +1,37 @@
-"""Scoring and a single concise Chinese report; metrics use measured API usage, never byte counts."""
-import json
-import math
+"""Tool-name-only scoring and a compact Chinese report; token usage comes from the API."""
 import statistics
 from collections import Counter
 from pathlib import Path
 
-from dataset import CITY_ALIASES
-
-
-def schema_errors(value, schema, path="arguments"):
-    errors = []
-    expected_type = schema.get("type")
-    types = {"object": lambda v: isinstance(v, dict), "array": lambda v: isinstance(v, list),
-             "string": lambda v: isinstance(v, str), "integer": lambda v: type(v) is int,
-             "number": lambda v: type(v) in (int, float) and math.isfinite(v),
-             "boolean": lambda v: type(v) is bool, "null": lambda v: v is None}
-    if expected_type and not types.get(expected_type, lambda v: False)(value):
-        return [f"{path} 类型应为 {expected_type}"]
-    if "enum" in schema and value not in schema["enum"]:
-        errors.append(f"{path} 不在允许值中")
-    if isinstance(value, dict):
-        properties = schema.get("properties", {})
-        errors += [f"{path} 缺少 {key}" for key in schema.get("required", []) if key not in value]
-        if schema.get("additionalProperties") is False:
-            errors += [f"{path} 多出 {key}" for key in value if key not in properties]
-        for key in value.keys() & properties.keys():
-            errors += schema_errors(value[key], properties[key], f"{path}.{key}")
-    elif isinstance(value, list):
-        for i, item in enumerate(value):
-            errors += schema_errors(item, schema.get("items", {}), f"{path}[{i}]")
-    elif type(value) in (int, float):
-        if not math.isfinite(value):
-            errors.append(f"{path} 必须是有限数字")
-        for key, compare in (("minimum", lambda a, b: a >= b), ("maximum", lambda a, b: a <= b)):
-            if key in schema and not compare(value, schema[key]):
-                errors.append(f"{path} 不满足 {key}={schema[key]}")
-    return errors
-
-
-def equivalent(key, actual, expected):
-    if key in ("latitude", "longitude"):
-        try:
-            return abs(float(actual) - float(expected)) < 1e-6
-        except (TypeError, ValueError):
-            return False
-    if key == "city" and isinstance(actual, str):
-        return actual.casefold() in [v.casefold() for v in [expected] + CITY_ALIASES.get(expected, [])]
-    if key == "keyword" and isinstance(actual, str) and isinstance(expected, str):
-        return actual.casefold() == expected.casefold()  # log-analyzer matches case-insensitively.
-    return actual == expected
-
 
 def score(message, case, supplied):
-    definitions = {t["name"]: t for t in supplied}
-    expected = {c["name"]: c["arguments"] for c in case["expected_calls"]}
-    calls = message.get("tool_calls") or []
+    """只评工具名称；参数缺失、值错或参数 JSON 无法解析均不影响这个指标。"""
+    expected = [call["name"] for call in case["expected_calls"]]
+    available = {tool["name"] for tool in supplied}
+    calls = message.get("tool_calls")
+    calls = [] if calls is None else calls
+    names, reasons = [], []
     if not isinstance(calls, list):
-        return {"selection_correct": False, "arguments_correct": False, "correct": False,
-                "called": [], "reasons": ["tool_calls 不是数组"]}
-    parsed, reasons = [], []
-    for call in calls:
-        try:
-            function = call["function"]
-            name = function["name"]
-            arguments = json.loads(function["arguments"])
-            if name not in definitions:
-                reasons.append(f"调用了候选集合外的工具 {name}")
-            else:
-                reasons.extend(schema_errors(arguments, definitions[name]["parameters"]))
-            parsed.append((name, arguments))
-        except (KeyError, TypeError, ValueError):
-            reasons.append("工具调用或参数JSON格式错误")
-    names = [name for name, _ in parsed]
-    selection = Counter(names) == Counter(expected.keys()) and len(parsed) == len(calls)
-    if not selection:
-        reasons.append(f"工具不匹配：预期 {list(expected)}，实际 {names}")
-    if not expected and not calls and not str(message.get("content") or "").strip():
-        reasons.append("无需工具的问题没有获得直接回答")
-    for name, arguments in parsed:
-        if name not in expected or not isinstance(arguments, dict):
-            continue
-        props = definitions.get(name, {}).get("parameters", {}).get("properties", {})
-        for key, value in expected[name].items():
-            actual = arguments.get(key, props.get(key, {}).get("default"))
-            if not equivalent(key, actual, value):
-                reasons.append(f"{name}.{key} 参数值与题目要求不符")
-    return {"selection_correct": selection, "arguments_correct": selection and not reasons,
-            "correct": selection and not reasons, "called": names, "reasons": reasons}
+        reasons.append("tool_calls 不是数组")
+    else:
+        for call in calls:
+            try:
+                name = call["function"]["name"]
+                if not isinstance(name, str) or not name:
+                    raise ValueError("工具名无效")
+                names.append(name)
+                if name not in available:
+                    reasons.append(f"调用了候选集合外的工具 {name}")
+            except (KeyError, TypeError, ValueError):
+                reasons.append("工具调用缺少有效名称")
+    if Counter(names) != Counter(expected):
+        reasons.append(f"工具不匹配：预期 {expected}，实际 {names}")
+    correct = not reasons
+    return {"selection_correct": correct, "correct": correct, "called": names, "reasons": reasons}
 
 
 def coverage(case, names):
-    expected = {c["name"] for c in case["expected_calls"]}
+    expected = {call["name"] for call in case["expected_calls"]}
     if not expected:
         return None, None
     found = len(expected & set(names))
@@ -98,203 +39,82 @@ def coverage(case, names):
 
 
 def mean(values):
-    values = [v for v in values if v is not None]
+    values = [value for value in values if value is not None]
     return statistics.mean(values) if values else None
 
 
 def aggregate(records):
-    valid = [r for r in records if not r.get("api_error")]
-    hit = [r for r in valid if r.get("retrieval_hit", True)]
+    valid = [record for record in records if not record.get("api_error")]
+    hit = [record for record in valid if record.get("retrieval_hit", True)]
+    correct = sum(record["selection_correct"] for record in valid)
+    accuracy = correct / len(valid) if valid else None
     return {"requests": len(records), "valid": len(valid), "api_errors": len(records) - len(valid),
-            "selection_accuracy": mean([int(r["selection_correct"]) for r in valid]),
-            "accuracy": mean([int(r["correct"]) for r in valid]),
-            # 候选里已含全部目标工具的题上，模型自己的正确率
-            "accuracy_on_hit": mean([int(r["correct"]) for r in hit]),
-            "hit_count": len(hit), "miss_count": len(valid) - len(hit),
-            "retrieval_fail": len(valid) - len(hit),
-            "selection_fail": sum(1 for r in hit if not r.get("selection_correct")),
-            "argument_fail": sum(1 for r in hit if r.get("selection_correct") and not r.get("correct")),
-            "prompt_tokens": mean([r["prompt_tokens"] for r in valid]),
-            "model_ms": mean([r["model_ms"] for r in valid]),
-            "total_ms": mean([r["model_ms"] + r["retrieval_ms"] for r in valid]),
-            "no_tool_accuracy": mean([int(r["correct"]) for r in valid if r["kind"] == "no_tool"]),
-            "multi_accuracy": mean([int(r["correct"]) for r in valid if r["kind"] == "multi"])}
+            "correct_count": correct, "selection_accuracy": accuracy, "accuracy": accuracy,
+            "prompt_tokens": mean([record["prompt_tokens"] for record in valid]),
+            "hit_count": len(hit), "retrieval_fail": len(valid) - len(hit),
+            "selection_fail": sum(not record["selection_correct"] for record in hit)}
 
 
 def percent(value):
     return "未测得" if value is None else f"{value * 100:.1f}%"
 
 
-def number(value, suffix=""):
-    return "未测得" if value is None else f"{value:.0f}{suffix}"
+def number(value):
+    return "未测得" if value is None else f"{value:,.0f}"
 
 
 def report(data, directory):
-    kinds = Counter(c["kind"] for c in data["cases"])
-    lines = ["# RAG 工具筛选对照", "",
-             f"状态：{data['status']}"]
+    config = data["config"]
+    selection = config.get("selection", "similarity")
+    label = {"similarity": "普通向量", "mmr": "MMR", "hybrid": "向量＋关键词倒排"}[selection]
+    lines = ["# RAG 工具选择对照", "", f"状态：{data['status']}"]
     if data.get("evidence") == "fixture":
-        lines.append("**模拟接口自检：以下准确率、token 与时间不能作为真实 RAG 效果结论。**")
-    lines += [f"模型：{data['config']['model']}｜Embedding：{data['config']['embedding_model']}"
-              f"｜重复 {data['config']['repeats']} 次｜按排名选取候选工具", "",
-             "## 1. 题目与目录", "",
-             f"{len(data['cases'])} 题：{kinds['single']} 单工具、{kinds['multi']} 多工具、"
-             f"{kinds['no_tool']} 无需工具。"]
-    multi_counts = [len({call['name'] for call in case['expected_calls']})
-                    for case in data['cases'] if case['kind'] == 'multi']
-    if multi_counts:
-        low, high = min(multi_counts), max(multi_counts)
-        count_text = str(low) if low == high else f"{low}～{high}"
-        lines.append(f"多工具题每题需要 {count_text} 个不同工具。")
-    selection = data["config"].get("selection", "similarity")
-    lines.append(f"筛选方式：{'MMR' if selection == 'mmr' else '普通相似度排序'}。")
-    if selection == "mmr":
-        lines.append(f"候选池上限 {data['config']['mmr_fetch_k']}，相关性权重 {data['config']['mmr_lambda']}；"
-                     "只复用现有向量，不增加拆分模型或查询Embedding请求。")
-
-    sizes = [str(s["size"]) for s in data["stages"]]
-    skipped = [f"{s['size']} 工具目录：{s.get('cases', 0)} 题参与" +
-               (f"，跳过 {s['skipped']} 题（所需工具不在该目录内）" if s.get("skipped") else "") for s in data["stages"]]
-    lines += [f"工具目录：{' / '.join(sizes)}。"] + [f"- {s}" for s in skipped]
-
-    lines += ["", "## 2. 检索有没有漏工具", "",
-              "| 目录 | k | 完整命中率 | 平均召回率 |", "|---:|---:|---:|---:|"]
-    for stage in data["stages"]:
-        metric = stage["retrieval"]
-        lines.append(f"| {stage['size']} | {stage['k']} | {percent(metric.get('complete'))} "
-                     f"| {percent(metric.get('recall'))} |")
-
-    if selection == "mmr":
-        lines += ["", "### 相同最终工具数量：普通排序与 MMR", "",
-                  "给齐题数只统计需要工具的题；多工具题必须把所需工具全部给齐。", "",
-                  "| 工具总数 | 最终最多 | 普通排序给齐 | MMR给齐 | 多工具题：普通 → MMR | 平均候选：普通 → MMR |",
-                  "|---:|---:|---:|---:|---:|---:|"]
+        lines.append("**模拟接口自检：以下数据不能作为真实 RAG 效果结论。**")
+    lines += [f"模型：{config['model']}｜Embedding：{config['embedding_model']}｜RAG：{label}",
+              f"{len(data['cases'])} 题，重复 {config['repeats']} 次。", ""]
+    if config.get("retrieval_only"):
+        lines += ["仅检索：没有调用对话模型，模型工具选择命中率和输入 token 未测量。", ""]
+        comparison = selection in ("mmr", "hybrid")
+        lines += ([f"| 工具总数 | 普通向量：工具找齐 | {label}：工具找齐 | 最终最多工具数 |",
+                   "|---:|---:|---:|---:|"] if comparison else
+                  ["| 工具总数 | 工具找齐 | 最终最多工具数 |", "|---:|---:|---:|"])
         for stage in data["stages"]:
-            base, mmr = stage["baseline_retrieval"], stage["retrieval"]
-            lines.append(f"| {stage['size']} | {stage['k']} | {base['hits']}/{base['required']} "
-                         f"| {mmr['hits']}/{mmr['required']} "
-                         f"| {base['multi_hits']}/{base['multi_required']} → {mmr['multi_hits']}/{mmr['multi_required']} "
-                         f"| {base['candidates']:.1f} → {mmr['candidates']:.1f} |")
-        lines.append("\n上述对照使用相同问题、目录和查询向量，只改变最终候选的选择方法。")
-
-    lines += ["", "### 正确工具为什么没进最终候选", "",
-              "以下按遗漏工具次数统计：一道题缺两个工具会计两次。分数和排名来自原问题与工具的余弦相似度。", "",
-              "| 工具总数 | 候选池之外 | MMR未选入 | 普通排序被数量截断 | 无有效向量 |",
-              "|---:|---:|---:|---:|---:|"]
-    for stage in data["stages"]:
-        counts = Counter(miss["reason_code"] for miss in stage.get("misses", []))
-        lines.append(f"| {stage['size']} | {counts['pool']} | {counts['mmr']} "
-                     f"| {counts['top_k']} | {counts['missing_vector']} |")
-    lines += ["", "| 工具总数 | 问题编号 | 缺少的正确工具 | 相似度 | 原始排名 | 未选中的阶段原因 |",
-              "|---:|---|---|---:|---:|---|"]
-    any_misses = False
-    for stage in data["stages"]:
-        for miss in stage.get("misses", []):
-            any_misses = True
-            score_text = "无" if miss["score"] is None else f"{miss['score']:.4f}"
-            question = miss["question"].replace("|", "\\|").replace("\n", " ")
-            lines.append(f"| {stage['size']} | {miss['id']}<br>{question} | {miss['tool']} | {score_text} "
-                         f"| {miss['rank'] if miss['rank'] is not None else '无'} | {miss['reason']} |")
-    if not any_misses:
-        lines.append("| — | 本次没有遗漏必需工具 | — | — | — | — |")
-    lines += ["", "这些是筛选阶段的直接原因，不证明Embedding为什么把工具排低。", ""]
-
-    if data["config"].get("retrieval_only"):
-        lines += ["", "## 3. 检索耗时", "",
-                  "| 工具总数 | 首次查询平均 | 缓存命中平均 |", "|---:|---:|---:|"]
+            metric = stage["retrieval"]
+            current = f"{percent(metric['complete'])}（{metric['hits']}/{metric['required']}）"
+            if comparison:
+                base = stage["baseline_retrieval"]
+                previous = f"{percent(base['complete'])}（{base['hits']}/{base['required']}）"
+                lines.append(f"| {stage['size']} | {previous} | {current} | {stage['k']} |")
+            else:
+                lines.append(f"| {stage['size']} | {current} | {stage['k']} |")
+        lines += ["", "工具找齐只统计需要工具的题；多工具题必须全部找到。"]
+    else:
+        lines += ["命中率只看工具是否全部选对，不漏选、不多选、不重复；忽略参数错误。无需工具的题不调用工具即算对。",
+                  "括号为选对题数／有效题数；平均输入 token 来自接口实际用量。", "",
+                  "| 工具总数 | 不使用RAG：命中率 | 使用RAG：命中率 | 不使用RAG：平均输入token | 使用RAG：平均输入token |",
+                  "|---:|---:|---:|---:|---:|"]
         for stage in data["stages"]:
-            lines.append(f"| {stage['size']} | {stage['retrieval_first_ms']:.2f} ms "
-                         f"| {stage['retrieval_warm_ms']:.2f} ms |")
-        lines += ["", "未调用对话模型：最终调用正确率和对话输入token均未测量。",
-                  "MMR只能重选候选池内的工具，无法补回候选池之外的工具。",
-                  "工具目录含模拟定义，题目为有限样本，召回结果不等于生产任务成功率。", ""]
-        directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
-        return
-
-    lines += ["", "## 3. 全量工具 vs RAG 筛选", "",
-              "命中题正确率＝候选里已含全部目标工具的那些题上，模型自己的正确率；用它区分“召回没给到”和“给了但选错”。",
-              "",
-              "| 目录 | 方式 | 调用正确率 | 命中题正确率 | 工具选择正确率 | 平均输入 token |",
-              "|---:|---|---:|---:|---:|---:|"]
-    for stage in data["stages"]:
-        for arm, label in (("all", "全量"), ("rag", f"RAG k={stage['k']}")):
-            row = stage["summary"][arm]
-            lines.append(f"| {stage['size']} | {label} | {percent(row['accuracy'])} "
-                         f"| {percent(row.get('accuracy_on_hit'))} | {percent(row['selection_accuracy'])} "
-                         f"| {number(row['prompt_tokens'])} |")
-
-    lines += ["", "## 4. 可以直接说的结论", ""]
-    for stage in data["stages"]:
-        base, rag = stage["summary"]["all"], stage["summary"]["rag"]
-        savings = None if not base["prompt_tokens"] or rag["prompt_tokens"] is None \
-            else 1 - rag["prompt_tokens"] / base["prompt_tokens"]
-        delta = None if base["accuracy"] is None or rag["accuracy"] is None \
-            else (rag["accuracy"] - base["accuracy"]) * 100
-        lines.append(f"- {stage['size']} 个工具：输入 token 降 {percent(savings)}，"
-                     f"调用正确率 {percent(base['accuracy'])} → {percent(rag['accuracy'])}"
-                     f"（{'+' if (delta or 0) >= 0 else ''}{number(delta)} 个百分点）。")
-        if rag.get("hit_count"):
-            lines.append(f"  RAG 召回到位的 {rag['hit_count']} 题上正确率 {percent(rag['accuracy_on_hit'])}"
-                         f"（全量同档 {percent(base.get('accuracy_on_hit'))}）；"
-                         f"失败归因：漏召回 {rag['retrieval_fail']} 题、选错工具 {rag['selection_fail']} 题、"
-                         f"参数错 {rag['argument_fail']} 题。")
-    if data["stages"]:
-        last = data["stages"][-1]["summary"]
-        lines.append(f"- 无需工具题正确率：全量 {percent(last['all']['no_tool_accuracy'])} / "
-                     f"RAG {percent(last['rag']['no_tool_accuracy'])}；"
-                     f"多工具题：全量 {percent(last['all']['multi_accuracy'])} / "
-                     f"RAG {percent(last['rag']['multi_accuracy'])}。")
-
-    failures = [r for r in data["records"] if r.get("api_error") or not r.get("correct")]
-    lines += ["", "## 5. 失败案例", ""]
-    if not failures:
-        lines.append("本次没有失败记录。")
-    for r in failures[:8]:
-        reason = r.get("api_error") or "；".join(r.get("reasons", [])[:2])
-        if r.get("api_error"):
-            tag = "接口异常"
-        elif not r.get("retrieval_hit", True):
-            tag = "漏召回"
-        elif not r.get("selection_correct"):
-            tag = "工具选错"
-        else:
-            tag = "参数错"
-        lines.append(f"- [{tag}][{r['size']}/{r['arm']}/{r['id']}] 预期 {r['expected_names']}，"
-                     f"实际 {r.get('called', [])} —— {reason}")
-    if len(failures) > 8:
-        lines.append(f"- 其余 {len(failures) - 8} 条略。")
-
-    miss = sum(1 for r in data["records"] if not r.get("api_error") and not r.get("retrieval_hit", True))
-    lines.append(f"\n全部记录中，因候选缺工具直接判错的 {miss} 条；其余失败是模型选错工具或参数。")
-
-    lines += ["", "## 6. 局限", "",
-              "- 除 4 个真实工具外，其余为只有元数据的模拟定义，不执行真实业务。",
-              f"- 单模型、单 Embedding、重复 {data['config']['repeats']} 次；结论只对这组题成立，不是生产准确率。",
-              "- 全量组与 RAG 组使用同一批工具定义与问题，比较只在同一目录内成立。", ""]
-
+            base, rag = stage["summary"]["all"], stage["summary"]["rag"]
+            base_rate = f"{percent(base['selection_accuracy'])}（{base['correct_count']}/{base['valid']}）"
+            rag_rate = f"{percent(rag['selection_accuracy'])}（{rag['correct_count']}/{rag['valid']}）"
+            lines.append(f"| {stage['size']} | {base_rate} | {rag_rate} "
+                         f"| {number(base['prompt_tokens'])} | {number(rag['prompt_tokens'])} |")
+        limits = sorted({stage['k'] for stage in data['stages']})
+        lines += ["", "RAG每题最多提供 " + " / ".join(str(limit) for limit in limits) + " 个工具。"]
+        failures = []
+        for stage in data["stages"]:
+            for arm, name in (("all", "不使用RAG"), ("rag", "使用RAG")):
+                row = stage["summary"][arm]
+                if row["api_errors"]:
+                    failures.append(f"{stage['size']}工具／{name}：有效{row['valid']}/{row['requests']}，接口失败{row['api_errors']}次")
+        if failures:
+            lines += ["", "接口失败未计入命中率和平均输入量，结果不完整："] + [f"- {failure}" for failure in failures]
+    lines += ["", "评测只检查工具调用，不执行模拟工具的真实业务。", ""]
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def console(data, directory):
-    print(f"\n========== RAG 工具筛选对照 ==========\n状态：{data['status']}")
-    for stage in data["stages"]:
-        metric = stage["retrieval"]
-        print(f"\n[{stage['size']} 个工具，k={stage['k']}，{stage.get('cases', 0)} 题]")
-        print(f"  检索完整命中率 {percent(metric.get('complete'))}，平均召回 {percent(metric.get('recall'))}")
-        if "baseline_retrieval" in stage:
-            base_metric = stage["baseline_retrieval"]
-            print(f"  工具给齐：普通排序 {base_metric['hits']}/{base_metric['required']} → "
-                  f"MMR {metric['hits']}/{metric['required']}")
-        if data["config"].get("retrieval_only"):
-            continue
-        base, rag = stage["summary"]["all"], stage["summary"]["rag"]
-        print(f"  全量：调用正确率 {percent(base['accuracy'])}，token {number(base['prompt_tokens'])}")
-        print(f"  RAG ：调用正确率 {percent(rag['accuracy'])}，命中题正确率 {percent(rag.get('accuracy_on_hit'))}，"
-              f"token {number(rag['prompt_tokens'])}")
-        print(f"  RAG 失败归因：漏召回 {rag['retrieval_fail']}、选错工具 {rag['selection_fail']}、"
-              f"参数错 {rag['argument_fail']}")
-    print(f"\n报告：{Path(directory) / 'report.md'}")
+    print("\n" + (Path(directory) / "report.md").read_text(encoding="utf-8"))
+    print(f"报告：{Path(directory) / 'report.md'}")

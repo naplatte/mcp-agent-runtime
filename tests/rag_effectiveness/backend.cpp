@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 using json = nlohmann::json;
 using namespace agent_rpc::mcp;
@@ -120,12 +121,18 @@ int main() {
                 if (requested_k <= 0)
                     throw std::runtime_error("k must be positive");
                 const auto selection = input.value("selection", "similarity");
-                if (selection != "similarity" && selection != "mmr")
+                if (selection != "similarity" && selection != "mmr" && selection != "hybrid")
                     throw std::runtime_error("Unknown selection strategy");
                 rag::MMRConfig mmr;
                 mmr.enabled = selection == "mmr";
                 mmr.fetch_k = input.value("mmr_fetch_k", 30);
                 mmr.lambda = input.value("mmr_lambda", 0.7f);
+                rag::HybridConfig hybrid;
+                hybrid.enabled = selection == "hybrid";
+                hybrid.fetch_k = input.value("hybrid_fetch_k", 50);
+                hybrid.rrf_k = input.value("rrf_k", 60);
+                if (hybrid.enabled && (hybrid.fetch_k < requested_k || hybrid.rrf_k < 0))
+                    throw std::runtime_error("Hybrid requires fetch_k >= k and nonnegative rrf_k");
                 if (mmr.enabled && (mmr.fetch_k < requested_k ||
                     !std::isfinite(mmr.lambda) || mmr.lambda < 0.0f || mmr.lambda > 1.0f))
                     throw std::runtime_error("MMR requires fetch_k >= k and lambda within [0, 1]");
@@ -134,12 +141,14 @@ int main() {
                 auto start = Clock::now();
                 std::vector<rag::RetrievedTool> selected;
                 std::vector<rag::RetrievedTool> ranking;
+                std::vector<rag::KeywordMatch> keyword_ranking;
                 if (requested_k >= static_cast<int>(indexed.size())) {
                     // k 不小于目录大小：退化为全量，返回全部工具。
                     selected = retriever->getAllTools();
                 } else {
-                    selected = retriever->retrieve(input.at("query"), requested_k, mmr,
-                                                  input.value("diagnostics", false) ? &ranking : nullptr);
+                    selected = retriever->retrieve(input.at("query"), requested_k, mmr, hybrid,
+                        input.value("diagnostics", false) ? &ranking : nullptr,
+                        input.value("diagnostics", false) ? &keyword_ranking : nullptr);
                 }
                 const double duration = elapsed(start);
                 auto after = retriever->getCacheStats();
@@ -159,13 +168,24 @@ int main() {
                           {"cache_misses", after.misses - before.misses}};
                 if (input.value("diagnostics", false)) {
                     std::set<std::string> selected_names;
+                    std::unordered_map<std::string, std::pair<size_t, double>> keyword_ranks;
+                    for (size_t i = 0; i < keyword_ranking.size(); ++i)
+                        keyword_ranks.emplace(keyword_ranking[i].name, std::make_pair(i + 1, keyword_ranking[i].score));
                     for (const auto& tool : selected) selected_names.insert(tool.name);
                     output["ranking"] = json::array();
                     for (size_t i = 0; i < ranking.size(); ++i) {
                         const auto& tool = ranking[i];
+                        const auto keyword = keyword_ranks.find(tool.name);
+                        const bool keyword_in_pool = keyword != keyword_ranks.end() &&
+                            keyword->second.first <= static_cast<size_t>(hybrid.fetch_k);
+                        const bool in_pool = hybrid.enabled
+                            ? i < static_cast<size_t>(hybrid.fetch_k) || keyword_in_pool
+                            : !mmr.enabled || i < static_cast<size_t>(mmr.fetch_k);
                         output["ranking"].push_back({{"name", tool.name}, {"rank", i + 1},
                             {"score", tool.relevance_score},
-                            {"in_pool", !mmr.enabled || i < static_cast<size_t>(mmr.fetch_k)},
+                            {"keyword_rank", keyword == keyword_ranks.end() ? json(nullptr) : json(keyword->second.first)},
+                            {"keyword_score", keyword == keyword_ranks.end() ? json(nullptr) : json(keyword->second.second)},
+                            {"in_pool", in_pool},
                             {"selected", selected_names.count(tool.name) != 0}});
                     }
                 }

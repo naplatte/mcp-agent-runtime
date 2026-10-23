@@ -13,6 +13,7 @@
 #include <sstream>
 #include <cmath>
 #include <stdexcept>
+#include <algorithm>
 
 using json = nlohmann::json;
 
@@ -40,7 +41,9 @@ bool ToolRetriever::initialize() {
         if (config_.top_k <= 0 || !std::isfinite(config_.mmr.lambda) ||
             config_.mmr.lambda < 0.0f || config_.mmr.lambda > 1.0f ||
             config_.mmr.fetch_k <= 0 ||
-            (config_.mmr.enabled && config_.mmr.fetch_k < config_.top_k))
+            (config_.mmr.enabled && config_.mmr.fetch_k < config_.top_k) ||
+            config_.hybrid.fetch_k <= 0 || config_.hybrid.rrf_k < 0 ||
+            (config_.hybrid.enabled && (config_.hybrid.fetch_k < config_.top_k || config_.mmr.enabled)))
             throw std::invalid_argument("Invalid retrieval/MMR configuration");
         // 创建 Embedding 服务
         embedding_service_ = std::make_unique<EmbeddingService>(config_.embedding_config);
@@ -50,6 +53,7 @@ bool ToolRetriever::initialize() {
         
         // 创建索引
         index_ = std::make_unique<VectorIndex>();
+        keyword_index_ = std::make_unique<KeywordIndex>();
         
         // 尝试加载索引
         if (!config_.index_path.empty()) {
@@ -58,6 +62,7 @@ bool ToolRetriever::initialize() {
             }
         }
         
+        rebuildKeywordIndex();
         initialized_ = true;
         LOG_INFO("ToolRetriever initialized successfully");
         return true;
@@ -81,6 +86,7 @@ void ToolRetriever::shutdown() {
     embedding_service_.reset();
     cache_.reset();
     index_.reset();
+    keyword_index_.reset();
     
     initialized_ = false;
     LOG_INFO("ToolRetriever shutdown");
@@ -122,6 +128,7 @@ void ToolRetriever::addTool(const ToolInfo& tool) {
         indexed_tool.embedding = embedding;
         
         index_->addTool(indexed_tool);
+        keyword_index_->addTool(tool.name, tool_text);
         
         LOG_INFO("Added tool to index: " + tool.name);
         
@@ -134,7 +141,9 @@ bool ToolRetriever::removeTool(const std::string& tool_name) {
     if (!initialized_) {
         return false;
     }
-    return index_->removeTool(tool_name);
+    const bool removed = index_->removeTool(tool_name);
+    keyword_index_->removeTool(tool_name);
+    return removed;
 }
 
 void ToolRetriever::refreshIndex() {
@@ -147,6 +156,7 @@ void ToolRetriever::refreshIndex() {
     
     // 清空索引
     index_->clear();
+    keyword_index_->clear();
     
     // 重新索引
     for (const auto& tool : tools) {
@@ -169,7 +179,16 @@ bool ToolRetriever::loadIndex() {
     if (!initialized_ || config_.index_path.empty()) {
         return false;
     }
-    return index_->loadFromFile(config_.index_path);
+    const bool loaded = index_->loadFromFile(config_.index_path);
+    rebuildKeywordIndex();
+    return loaded;
+}
+
+void ToolRetriever::rebuildKeywordIndex() {
+    keyword_index_->clear();
+    for (const auto& tool : index_->getAllTools()) {
+        keyword_index_->addTool(tool.name, buildToolText({tool.name, tool.description, tool.input_schema}));
+    }
 }
 
 std::vector<RetrievedTool> ToolRetriever::retrieve(const std::string& query) {
@@ -177,13 +196,20 @@ std::vector<RetrievedTool> ToolRetriever::retrieve(const std::string& query) {
 }
 
 std::vector<RetrievedTool> ToolRetriever::retrieve(const std::string& query, int top_k) {
-    return retrieve(query, top_k, config_.mmr);
+    return retrieve(query, top_k, config_.mmr, config_.hybrid);
 }
 
 std::vector<RetrievedTool> ToolRetriever::retrieve(
     const std::string& query, int top_k, const MMRConfig& mmr,
     std::vector<RetrievedTool>* ranking) {
+    return retrieve(query, top_k, mmr, HybridConfig{}, ranking);
+}
+
+std::vector<RetrievedTool> ToolRetriever::retrieve(
+    const std::string& query, int top_k, const MMRConfig& mmr, const HybridConfig& hybrid,
+    std::vector<RetrievedTool>* ranking, std::vector<KeywordMatch>* keyword_ranking) {
     if (ranking) ranking->clear();
+    if (keyword_ranking) keyword_ranking->clear();
     if (!initialized_) {
         LOG_ERROR("ToolRetriever not initialized");
         return {};
@@ -196,14 +222,16 @@ std::vector<RetrievedTool> ToolRetriever::retrieve(
     
     try {
         if (top_k <= 0 || (mmr.enabled && (mmr.fetch_k < top_k ||
-            !std::isfinite(mmr.lambda) || mmr.lambda < 0.0f || mmr.lambda > 1.0f)))
+            !std::isfinite(mmr.lambda) || mmr.lambda < 0.0f || mmr.lambda > 1.0f)) ||
+            (hybrid.enabled && (hybrid.fetch_k < top_k || hybrid.rrf_k < 0 || mmr.enabled)))
             throw std::invalid_argument("Invalid top_k or MMR configuration");
         // 获取查询向量
         std::vector<float> query_embedding = getEmbedding(query);
 
-        // 仅评测诊断启用：保留未按 K 截断的排名，复用同一个查询向量。
+        std::vector<SearchResult> all;
+        if (ranking || hybrid.enabled) all = index_->search(query_embedding, static_cast<int>(index_->size()));
+        // 评测保留完整的原始向量排名，融合排序不覆盖这个分数。
         if (ranking) {
-            auto all = index_->search(query_embedding, static_cast<int>(index_->size()));
             ranking->reserve(all.size());
             for (const auto& item : all) {
                 ranking->push_back({item.tool.name, item.tool.description,
@@ -212,9 +240,27 @@ std::vector<RetrievedTool> ToolRetriever::retrieve(
         }
         
         // 搜索
-        auto search_results = mmr.enabled
-            ? index_->searchMMR(query_embedding, top_k, mmr)
-            : index_->search(query_embedding, top_k);
+        std::vector<SearchResult> search_results;
+        if (hybrid.enabled) {
+            std::unordered_map<std::string, const SearchResult*> valid;
+            std::vector<std::string> dense_names, keyword_names;
+            for (const auto& item : all) {
+                valid.emplace(item.tool.name, &item);
+                if (dense_names.size() < static_cast<size_t>(hybrid.fetch_k)) dense_names.push_back(item.tool.name);
+            }
+            // 只允许具有有效向量的工具进入融合；关键词结果不能绕过向量校验。
+            for (const auto& match : keyword_index_->search(query, static_cast<int>(index_->size()))) {
+                if (!valid.count(match.name)) continue;
+                if (keyword_ranking) keyword_ranking->push_back(match);
+                if (keyword_names.size() < static_cast<size_t>(hybrid.fetch_k)) keyword_names.push_back(match.name);
+            }
+            for (const auto& name : reciprocalRankFusion(dense_names, keyword_names, top_k, hybrid.rrf_k)) {
+                search_results.push_back(*valid.at(name));
+            }
+        } else {
+            search_results = mmr.enabled ? index_->searchMMR(query_embedding, top_k, mmr)
+                                         : index_->search(query_embedding, top_k);
+        }
         
         // 转换结果
         std::vector<RetrievedTool> results;

@@ -152,12 +152,18 @@ def retrieval_misses(suite, queries, selection, k, fetch_k):
                 code, reason = "pool", f"排名超过候选池上限{fetch_k}"
             elif selection == "mmr":
                 code, reason = "mmr", f"进入候选池，但MMR未选入最终{k}个"
+            elif selection == "hybrid" and not entry["in_pool"]:
+                code, reason = "pool", f"未进入向量或关键词任一路前{fetch_k}个候选"
+            elif selection == "hybrid":
+                code, reason = "fusion", f"进入合并候选池，但融合排名未进入最终{k}个"
             else:
                 code, reason = "top_k", f"排名未进入最终{k}个，被数量限制截断"
             misses.append({"id": case["id"], "kind": case["kind"], "question": case["question"],
                            "tool": name, "reason_code": code, "reason": reason,
                            "rank": entry["rank"] if entry else None,
-                           "score": entry["score"] if entry else None})
+                           "score": entry["score"] if entry else None,
+                           "keyword_rank": entry.get("keyword_rank") if entry else None,
+                           "keyword_score": entry.get("keyword_score") if entry else None})
     return misses
 
 
@@ -166,7 +172,9 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
     retrieval_only = getattr(args, "retrieval_only", False)
     selection_config = {"selection": selection,
                         "mmr_fetch_k": getattr(args, "mmr_fetch_k", 30),
-                        "mmr_lambda": getattr(args, "mmr_lambda", 0.7)}
+                        "mmr_lambda": getattr(args, "mmr_lambda", 0.7),
+                        "hybrid_fetch_k": getattr(args, "hybrid_fetch_k", 50),
+                        "rrf_k": getattr(args, "rrf_k", 60)}
     suite = cases()
     if args.quick:
         chosen = {"weather-2", "tail-2", "filter-2", "summary-2", "gh-search-1", "slack-post-1",
@@ -216,7 +224,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                                  or warm[case["id"]]["cache_hits"] != 1):
                     raise RuntimeError("冷查询/重复查询缓存状态不符合预期")
                 retrieval[case["id"]] = first
-                if selection == "mmr":
+                if selection in ("mmr", "hybrid"):
                     # 同一查询、同一索引、同一个已缓存向量，只改变候选选择方法。
                     comparison = bridge.request(dict(request, selection="similarity", diagnostics=True))
                     if comparison["cache_misses"] != 0:
@@ -234,7 +242,7 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
                      "query_hits": sum(retrieval[c["id"]]["cache_hits"] for c in stage_suite),
                      "queries": retrieval}
             stage["misses"] = retrieval_misses(stage_suite, retrieval, selection, k,
-                                                selection_config["mmr_fetch_k"])
+                selection_config["hybrid_fetch_k"] if selection == "hybrid" else selection_config["mmr_fetch_k"])
             if baseline:
                 stage["baseline_retrieval"] = retrieval_metrics(stage_suite, baseline)
                 stage["baseline_queries"] = baseline
@@ -292,7 +300,12 @@ def evaluate(args, executable, server, plugins, directory, log_dir):
             report(data, directory)
         raise
     finally:
-        bridge.close()
+        try:
+            # 主报告只显示命中率和输入量；诊断与逐题接口错误留在日志目录。
+            (Path(log_dir) / "evaluation_details.json").write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        finally:
+            bridge.close()
 
 
 def main():
@@ -309,11 +322,13 @@ def main():
     parser.add_argument("--dimension", type=int, default=1536)
     parser.add_argument("--chat-url", default=DEFAULT_CHAT)
     parser.add_argument("--embedding-url", default=DEFAULT_EMBEDDING)
-    parser.add_argument("--k", type=int, default=10, help="RAG 候选数；工具数不超过 k 时退化为全量")
-    parser.add_argument("--selection", choices=("similarity", "mmr"), default="similarity",
-                        help="候选选择方法；MMR报告同时给出相同k的普通排序召回")
+    parser.add_argument("--k", type=int, default=20, help="RAG 候选数，默认20；工具数不超过 k 时退化为全量")
+    parser.add_argument("--selection", choices=("similarity", "mmr", "hybrid"), default="similarity",
+                        help="普通向量、MMR或向量加关键词；仅检索模式同时对照普通向量")
     parser.add_argument("--mmr-fetch-k", type=int, default=30, help="MMR候选池上限，必须不小于k")
     parser.add_argument("--mmr-lambda", type=float, default=0.7, help="MMR相关性权重[0,1]，1等价于普通排序")
+    parser.add_argument("--hybrid-fetch-k", type=int, default=50, help="混合检索每路候选数，必须不小于k")
+    parser.add_argument("--rrf-k", type=int, default=60, help="排名融合常数，不是最终工具数量")
     parser.add_argument("--sizes", type=lambda s: [int(v) for v in s.split(",")], default=[50, 100, 300])
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=90)
@@ -331,6 +346,10 @@ def main():
         parser.error("MMR候选池必须为正，权重必须是[0,1]内的有限数")
     if args.selection == "mmr" and args.mmr_fetch_k < args.k:
         parser.error("MMR候选池不能小于最终k")
+    if args.hybrid_fetch_k < 1 or args.rrf_k < 0:
+        parser.error("混合候选池必须为正，排名融合常数不能为负")
+    if args.selection == "hybrid" and args.hybrid_fetch_k < args.k:
+        parser.error("混合检索每路候选数不能小于最终k")
     if args.live and not chat_key(os.environ, args.chat_key_env):
         print(f"[未运行] 请先设置{args.chat_key_env}（对话模型密钥）；缺少密钥不是测试通过。", file=sys.stderr)
         return 77

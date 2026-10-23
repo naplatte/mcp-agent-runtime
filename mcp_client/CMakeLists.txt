@@ -9,6 +9,7 @@ set(MCP_CLIENT_SOURCES
     src/rag/embedding_service.cpp
     src/rag/embedding_cache.cpp
     src/rag/vector_index.cpp
+    src/rag/keyword_index.cpp
     src/rag/tool_retriever.cpp
     src/rag/tool_validator.cpp
 )

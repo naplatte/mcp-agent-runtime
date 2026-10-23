@@ -359,6 +359,9 @@ bool MCPAgentIntegration::initializeRAG() {
         retriever_config.mmr.enabled = config_.rag_config.enable_mmr;
         retriever_config.mmr.fetch_k = config_.rag_config.mmr_fetch_k;
         retriever_config.mmr.lambda = config_.rag_config.mmr_lambda;
+        retriever_config.hybrid.enabled = config_.rag_config.enable_hybrid;
+        retriever_config.hybrid.fetch_k = config_.rag_config.hybrid_fetch_k;
+        retriever_config.hybrid.rrf_k = config_.rag_config.hybrid_rrf_k;
         
         // 缓存配置
         retriever_config.cache_config.enabled = config_.rag_config.enable_cache;
@@ -528,6 +531,12 @@ MCPAgentConfig parseMCPConfigFromArgs(int argc, char* argv[]) {
             config.rag_config.mmr_fetch_k = std::stoi(argv[++i]);
         } else if (arg == "--rag-mmr-lambda" && i + 1 < argc) {
             config.rag_config.mmr_lambda = std::stof(argv[++i]);
+        } else if (arg == "--rag-hybrid") {
+            config.rag_config.enable_hybrid = true;
+        } else if (arg == "--rag-hybrid-fetch-k" && i + 1 < argc) {
+            config.rag_config.hybrid_fetch_k = std::stoi(argv[++i]);
+        } else if (arg == "--rag-rrf-k" && i + 1 < argc) {
+            config.rag_config.hybrid_rrf_k = std::stoi(argv[++i]);
         } else if (arg == "--rag-index-path" && i + 1 < argc) {
             config.rag_config.index_path = argv[++i];
         }

@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 from dataset import cases, catalogs, definition, text
-from evaluation import aggregate, coverage, score
+from evaluation import aggregate, coverage, report, score
 from run import Bridge, evaluate, retrieval_misses
 import run
 
@@ -111,7 +111,7 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(len({t["name"] for t in groups[-1]}), 300)
         self.assertEqual(len({t["description"] for t in groups[-1]}), 300)
 
-    def test_tool_and_argument_failures_are_scored_separately(self):
+    def test_only_tool_names_are_scored_even_with_bad_arguments(self):
         tool = definition("get_weather", "weather", {"city": text("City"), "latitude": text("Latitude"),
                                                    "longitude": text("Longitude")}, ["city", "latitude", "longitude"])
         case = cases()[0]
@@ -124,7 +124,13 @@ class ScoringTests(unittest.TestCase):
         bad = dict(good, latitude=39.9)
         scored = score(message(bad), case, [tool])
         self.assertTrue(scored["selection_correct"])
-        self.assertFalse(scored["correct"])
+        self.assertTrue(scored["correct"])
+        malformed = message(good)
+        malformed['tool_calls'][0]['function']['arguments'] = '{invalid-json'
+        self.assertTrue(score(malformed, case, [tool])["correct"])
+        del malformed['tool_calls'][0]['function']['arguments']
+        self.assertTrue(score(malformed, case, [tool])["correct"])
+        self.assertFalse(score(message(good), case, [])["correct"])
         self.assertFalse(score(message(good, "air_quality"), case, [tool])["correct"])
         duplicate = message(good)
         duplicate["tool_calls"] *= 2
@@ -136,7 +142,8 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(coverage(case, ["get_weather", "tail_log"]), (1.0, True))
         no_tool = next(c for c in cases() if c["kind"] == "no_tool")
         self.assertTrue(score({"content": "你好"}, no_tool, [])["correct"])
-        self.assertFalse(score({"content": ""}, no_tool, [])["correct"])
+        self.assertTrue(score({"content": ""}, no_tool, [])["correct"])
+        self.assertFalse(score({"tool_calls": [{}]}, no_tool, [])["correct"])
 
     def test_api_errors_are_not_zero_tokens_or_success(self):
         result = aggregate([{"api_error": "HTTP 401"}])
@@ -145,9 +152,61 @@ class ScoringTests(unittest.TestCase):
         self.assertIsNone(result["accuracy"])
         self.assertIsNone(result["prompt_tokens"])
 
+    def test_compact_report_discloses_api_failures_without_parameter_metrics(self):
+        valid = {"selection_correct": True, "prompt_tokens": 321, "retrieval_hit": True}
+        summary = aggregate([valid, {"api_error": "HTTP 500"}])
+        data = {"status": "不完整：存在API失败", "config": {"model": "fixture", "embedding_model": "fixture",
+                "repeats": 1, "selection": "hybrid"}, "cases": cases(),
+                "stages": [{"size": 50, "k": 20, "summary": {"all": summary, "rag": summary}}]}
+        with tempfile.TemporaryDirectory() as directory:
+            report(data, directory)
+            rendered = (Path(directory) / 'report.md').read_text(encoding='utf-8')
+        self.assertIn('100.0%（1/1）', rendered)
+        self.assertIn('有效1/2，接口失败1次', rendered)
+        self.assertIn('321', rendered)
+        self.assertNotIn('命中题正确率', rendered)
+        self.assertNotIn('参数错1题', rendered)
+
 
 @unittest.skipUnless(os.environ.get("RAG_EVAL_BACKEND"), "Build the C++ backend using run.py --self-test")
 class BackendTests(unittest.TestCase):
+    def test_hybrid_recovers_keyword_tool_and_rebuilds_after_reload_without_extra_embedding(self):
+        with tempfile.TemporaryDirectory() as directory, local_api() as (api, url):
+            bridge = Bridge(os.environ["RAG_EVAL_BACKEND"], directory)
+            try:
+                tools = [definition("a_control", "Inspect host status.", {}, []),
+                         definition("b_control", "Read resource configuration.", {}, []),
+                         definition("c_control", "List pending tasks.", {}, []),
+                         definition("z_packager", "Export tarball archives.", {}, [])]
+                bridge.request({"op": "index", "tools": tools, "fixture_key": "offline-fixture",
+                                "dimension": 8, "embedding_url": url + "/embedding",
+                                "index_path": str(Path(directory) / "index.json")})
+                request = {"op": "retrieve", "query": "tarball", "k": 2,
+                           "hybrid_fetch_k": 2, "diagnostics": True}
+                ordinary = bridge.request(dict(request, selection="similarity"))
+                self.assertNotIn("z_packager", [tool["name"] for tool in ordinary['tools']])
+                before = len(api.requests)
+                hybrid = bridge.request(dict(request, selection="hybrid"))
+                self.assertEqual(len(api.requests), before)
+                self.assertEqual(hybrid['cache_misses'], 0)
+                self.assertEqual(len(hybrid['tools']), 2)
+                self.assertIn("z_packager", [tool["name"] for tool in hybrid['tools']])
+                target = next(item for item in hybrid['ranking'] if item['name'] == 'z_packager')
+                self.assertEqual((target['rank'], target['keyword_rank']), (4, 1))
+                self.assertTrue(target['in_pool'])
+                with self.assertRaisesRegex(RuntimeError, 'fetch_k'):
+                    bridge.request(dict(request, selection='hybrid', hybrid_fetch_k=1))
+                bridge.request({"op": "reset_query_cache"})
+                reloaded = bridge.request(dict(request, selection='hybrid'))
+                self.assertEqual(reloaded['tools'], hybrid['tools'])
+                self.assertEqual(len(api.requests), before + 1)
+                unmatched = dict(request, query='qqqunmatched', diagnostics=False)
+                plain = bridge.request(dict(unmatched, selection='similarity'))
+                fused = bridge.request(dict(unmatched, selection='hybrid'))
+                self.assertEqual(plain['tools'], fused['tools'])
+            finally:
+                bridge.close()
+
     def test_mmr_reuses_query_embedding_and_exposes_unfiltered_ranking(self):
         with tempfile.TemporaryDirectory() as directory, local_api() as (api, url):
             bridge = Bridge(os.environ["RAG_EVAL_BACKEND"], directory)
@@ -199,13 +258,12 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(stage["query_misses"], len(data["cases"]))
             self.assertIn("baseline_retrieval", stage)
             text_report = (Path(directory) / "report.md").read_text(encoding="utf-8")
-            self.assertIn("普通排序与 MMR", text_report)
-            self.assertIn("正确工具为什么没进最终候选", text_report)
-            self.assertIn("普通排序被数量截断", text_report)
+            self.assertIn("普通向量：工具找齐", text_report)
+            self.assertIn("MMR：工具找齐", text_report)
             self.assertNotIn("相似度阈值", text_report)
             self.assertNotIn("低于阈值", text_report)
-            self.assertIn("多工具题每题需要 2 个不同工具", text_report)
-            self.assertIn("最终调用正确率和对话输入token均未测量", text_report)
+            self.assertIn("模型工具选择命中率和输入 token 未测量", text_report)
+            self.assertTrue((Path(directory) / 'logs' / 'evaluation_details.json').exists())
 
     def test_actual_cpp_discovery_retrieval_cache_and_error_boundary(self):
         with tempfile.TemporaryDirectory() as directory, local_api() as (api, url):
@@ -256,10 +314,13 @@ class BackendTests(unittest.TestCase):
     def test_complete_mmr_driver_reports_are_explicitly_fixture_only(self):
         self.check_complete_driver("mmr")
 
+    def test_complete_hybrid_driver_reports_are_explicitly_fixture_only(self):
+        self.check_complete_driver("hybrid")
+
     def check_complete_driver(self, selection):
         with tempfile.TemporaryDirectory() as directory, local_api() as (_, url), patch.dict(os.environ, {"DASHSCOPE_API_KEY": "offline-fixture"}):
             args = types.SimpleNamespace(quick=False, repeats=2, model="fixture", embedding_model="fixture",
-                                         dimension=8, sizes=[50, 100, 300], k=20 if selection == "similarity" else 10,
+                                         dimension=8, sizes=[50, 100, 300], k=10 if selection == "mmr" else 20,
                                          selection=selection, mmr_fetch_k=30, mmr_lambda=0.7,
                                          chat_url=url + "/chat", embedding_url=url + "/embedding", timeout=3, fixture=True)
             with contextlib.redirect_stdout(io.StringIO()):
@@ -282,8 +343,9 @@ class BackendTests(unittest.TestCase):
             self.assertEqual([p.name for p in Path(directory).iterdir() if p.is_file()], ["report.md"])
             text_report = (Path(directory) / "report.md").read_text()
             self.assertIn("不能作为真实 RAG 效果结论", text_report)
-            self.assertIn("全量", text_report)
-            self.assertIn("失败案例", text_report)
+            self.assertIn("不使用RAG：命中率", text_report)
+            self.assertIn("使用RAG：平均输入token", text_report)
+            self.assertNotIn("命中题正确率", text_report)
             self.assertNotIn("相似度阈值", text_report)
             self.assertNotIn("低于阈值", text_report)
 
