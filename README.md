@@ -1,417 +1,264 @@
-# MCP (Model Context Protocol) 完整实现
+# MCP Agent Runtime
 
-MCP 协议的完整 C++ 实现，包含 MCP 客户端、MCP 服务器和 RAG-MCP 智能工具检索模块。
+一个使用 **C++20** 实现的 MCP 客户端、插件式服务端与 RAG 工具检索项目。
 
-从 [agent-communication](../) 项目中独立提取的子项目。
+项目围绕“发现工具 → 筛选工具 → 执行调用”构建：通过 MCP 获取工具定义，按用户问题检索相关工具，再将候选交给模型选择并执行。适合学习 C++ 下的 MCP 通信、动态插件扩展，以及工具数量增加时的检索与评测。
 
-## 请求超时、取消与 SSE 保活
+## 核心能力
 
-客户端的 `MCPConnectionConfig` 支持以下配置：
+| 模块 | 已实现的能力 |
+| --- | --- |
+| MCP 客户端 | STDIO 与 Streamable HTTP 两种传输；Tool、Prompt、Resource 接口；通知回调 |
+| 请求管理 | 请求 ID 匹配、超时等待、取消通知、断开连接时唤醒等待请求 |
+| 插件式服务端 | 启动时递归加载 `.so` 插件，统一分发工具调用、提示模板和资源读取 |
+| Agent 集成层 | 工具发现与缓存、同步/异步调用、调用结果封装、RAG 候选筛选 |
+| RAG 工具检索 | 向量相似度检索、BM25 + RRF 混合检索、MMR 多样性选择 |
+| 缓存与索引 | 带 TTL 的 LRU Embedding 缓存、向量索引保存与加载 |
+| 验证与评测 | 离线回归、真实模型端到端测试、全量工具与 RAG 候选的对照评测 |
 
-| 配置 | 默认值 | 用途 |
-| --- | --- | --- |
-| `request_timeout_ms` | 30000 ms | stdio / HTTP 单次请求的等待期限 |
-| `connect_timeout_ms` | 5000 ms | HTTP 建立连接的等待期限 |
-| `cancellation_timeout_ms` | 1000 ms | HTTP 取消通知的发送期限，后台发送，不延长原请求等待 |
+这里的 RAG 检索对象是**工具名称、描述和参数元数据**。检索结果用于缩小模型看到的工具集合。
 
-每个请求按独立的 `id` 保存等待状态。超时会返回客户端本地错误
-`MCPResponse{is_error=true, error="Request timeout"}`，移除等待项，并尽力发送无 `id` 的
-`notifications/cancelled`。之后收到的迟到响应、未知响应和重复响应会被丢弃，不会误交给下一个调用。
-超时不需要等待服务端再返回 `result` 或 `error`。收到响应时，顶层 `error` 和工具结果中的
-`result.isError` 仍分别表示协议/请求失败与工具执行失败；本改动不自动重试工具调用。
+## 整体结构
 
-服务端将工具执行放到独立工作线程中，读线程可以同时接收取消通知。等待中的任务会跳过执行；
-执行中的任务通过取消标记协作退出；已取消任务的响应会被抑制。插件执行保持串行，避免旧插件突然
-面临多个调用并发执行。原有 `PluginAPI` 的布局保持兼容，插件可以额外导出：
-
-```cpp
-extern "C" PLUGIN_API char* HandleRequestWithContext(
-    const char* request, const PluginRequestContext* context);
+```mermaid
+flowchart TD
+    App[应用 / 模型调用逻辑] --> Integration[MCPAgentIntegration]
+    Integration --> Retriever[ToolRetriever：筛选相关工具]
+    Retriever --> Embedding[Embedding 服务与 LRU 缓存]
+    Retriever --> Index[向量索引 / BM25 倒排索引]
+    Integration --> Manager[MCPToolManager]
+    Manager --> Client[MCPClient]
+    Client --> Transport[STDIO / Streamable HTTP]
+    Transport --> Server[MCP Server]
+    Server --> Plugins[动态插件：Tool / Prompt / Resource]
 ```
 
-插件在执行期间调用 `context->IsCancelled(context->user_data)` 检查取消信号。
-上下文只在本次调用期间有效，不能保存在插件中继续使用。内置 `sleep` 插件已接入，约每 10 ms
-检查一次；未接入的旧插件仍可以加载，但执行中的阻塞操作无法被框架强制中止，仍可能占用工作线程。
-取消也不能撤销已经产生的外部副作用。
+`MCPClient` 负责通信，`MCPToolManager` 管理工具元数据与调用，`MCPAgentIntegration` 提供应用侧接口。当前集成层通过 STDIO 启动本地服务；使用 Streamable HTTP 时直接配置 `MCPClient`。
 
-HTTP 服务端可以分别配置响应等待期限和保活周期：
-
-```bash
-./build/mcp_server/mcp_server -p ./build/mcp_server/plugins \
-  --streamable-http --http-port 8080 \
-  --request-timeout-ms 30000 --sse-keepalive-ms 15000
-```
-
-响应等待超时会返回对应 `id` 的 JSON-RPC 错误，并取消服务端任务。
-SSE 使用 `: keepalive` 注释帧，默认每 15 秒一次，`--sse-keepalive-ms 0` 可以关闭。
-保活帧维持 HTTP 事件流，不表示工具已经完成，也不会重置工具调用的超时期限。
-客户端的 GET 通知流保持长连接，不再每两秒因本地超时断开；主动断开客户端时会停止接收。
-stdio 没有新增定时心跳线程，连接断开通过 EOF/读写失败处理；现有 `ping` 方法仍保留。
-
-**协议范围：** 当前项目仍按 `2025-11-25` 的初始化及消息结构工作，本次是超时与连接生命周期改进，
-没有完成整个 `2026-07-28` 协议升级。C++ HTTP 客户端额外发送项目扩展头
-`X-MCP-Cancel-On-Disconnect: true`，显式启用「单次请求使用 SSE 返回，关闭该请求流即取消任务」。
-这不是 MCP 标准头。没有该头的客户端仍收到 JSON 响应，并通过 `notifications/cancelled` 显式取消；
-GET 通知流断开不会取消所有工具调用。C++ 客户端发生 HTTP 超时时，也会尽力发送取消通知，兼容忽略
-该扩展头的服务端。
-
-### 离线回归测试（Linux / WSL）
-
-```bash
-cmake -S . -B build -DBUILD_TESTS=ON -DBUILD_MCP_EXAMPLES=OFF
-cmake --build build -j 4
-ctest --test-dir build --output-on-failure -R mcp_timeouts
-```
-
-测试覆盖 stdio / HTTP 超时、协作取消、独立关闭请求流、服务端等待期限、乱序/迟到响应、
-意外 EOF 后重连、主动断开唤醒等待，以及分片 SSE 解析和 GET 长连接；不依赖模型或天气 API。
-
-## 使用doxyfile构建：
-```
-doxygen Doxyfile
-cd docs/doxygen_output/html
-python3 -m http.server 8080
-```
-## 项目推送
-```
-# 1. 看看有没有改动
-git status
-
-# 2. 如果有改动，添加并提交
-git add .
-git commit -m "你的提交信息"
-
-# 3. 推送到 GitHub
-git push
-
-# 下拉
-# 1. 先看当前状态，确认没有未提交的改动
-git status
-
-# 2. 如果有未提交改动，先 stash 或 commit
-git stash        # 暂存
-# 或
-git add . && git commit -m "xxx"
-
-# 3. 拉取最新代码（推荐用 rebase 保持历史干净）
-git pull --rebase
-
-# 4. 如果之前 stash 了，恢复
-git stash pop
-
-pull异常：
-sudo chown -R admin:admin ~/mcp-agent-runtime/.git
-git pull
-```
-
-## 项目结构
-
-```
-mcp-agent-runtime/
-├── CMakeLists.txt              # 根构建文件
-├── README.md
-├── common/                     # 公共组件（日志）
-│   ├── include/agent_rpc/common/
-│   │   └── logger.h            # 日志系统接口
-│   └── src/
-│       └── logger.cpp          # 日志实现
-├── mcp_client/                 # MCP 客户端库
-│   ├── include/agent_rpc/mcp/
-│   │   ├── mcp_client.h        # MCP 客户端接口（STDIO + Streamable HTTP）
-│   │   ├── mcp_agent_integration.h  # AI Agent 集成辅助类
-│   │   └── rag/                # RAG-MCP 模块
-│   │       ├── embedding_service.h  # DashScope 向量化服务
-│   │       ├── embedding_cache.h    # LRU 向量缓存
-│   │       ├── vector_index.h       # 向量索引
-│   │       ├── tool_retriever.h     # 工具检索器
-│   │       └── tool_validator.h     # 工具验证器
-│   └── src/
-│       ├── mcp_client.cpp           # 客户端实现
-│       ├── mcp_tool_manager.cpp     # 工具管理器
-│       ├── mcp_agent_integration.cpp # Agent 集成
-│       └── rag/                     # RAG 实现
-├── mcp_server/                 # MCP 服务器（独立可执行程序）
-│   ├── include/                # 所有服务器头文件
-│   │   ├── ITransport.h        # 传输层接口
-│   │   ├── PluginAPI.h         # 插件 C ABI 定义
-│   │   ├── Server.h            # 核心 JSON-RPC 服务器
-│   │   ├── StdioTransport.h    # STDIO 传输实现
-│   │   ├── StreamableHttpTransport.h # Streamable HTTP 传输实现
-│   │   ├── PluginsLoader.h     # 动态插件加载器
-│   │   ├── MCPBuilder.h        # JSON-RPC 响应构建器
-│   │   └── SessionBuilder.h    # 会话 ID 生成器
-│   ├── src/                    # 实现文件
-│   │   ├── main.cpp            # 服务器入口
-│   │   ├── Server.cpp          # 核心服务器实现
-│   │   ├── StdioTransport.cpp  # STDIO 传输实现
-│   │   ├── StreamableHttpTransport.cpp # Streamable HTTP 传输实现
-│   │   └── PluginsLoader.cpp   # 插件加载器实现
-│   └── plugins/                # 内置插件
-│       ├── calculator/         # 计算器
-│       ├── weather/            # 天气查询
-│       ├── sleep/              # 延时工具
-│       ├── code-review/        # 代码审查
-│       ├── notification/       # 通知
-│       └── bacio-quote/        # 名言
-├── third_party/                # 第三方库
-│   ├── httplib.h               # cpp-httplib (HTTP 服务器)
-│   ├── json.hpp                # nlohmann/json
-│   ├── popl.hpp                # 命令行参数解析
-│   ├── base64.hpp              # Base64 编解码
-│   └── aixlog.hpp              # 日志库
-├── tests/                      # 测试脚本与配置
-│   ├── test_all.sh             # 统一测试入口
-│   ├── cpp/                    # C++ 集成测试 (使用项目自身 mcp_client)
-│   │   └── test_mcp_integration.cpp
-│   ├── python/                 # Python 测试客户端
-│   │   ├── test_ai_mcp.py      # AI 集成测试
-│   │   ├── test-client-stdio.py
-│   │   ├── test-client-streamable-http.py
-│   │   └── test-client-http.py
-│   └── config/                 # 测试配置
-│       ├── configuration-*.json
-│       └── requirements.txt
-├── examples/                   # 示例代码
-│   └── rag_mcp_example.cpp
-└── docs/                       # 文档
-    ├── mcp-plugin-development.md
-    └── rag-mcp-guide.md
-```
-
-## 核心组件
-
-### 1. MCP 客户端 (`mcp_client`)
-
-支持两种传输模式的 MCP 客户端：
-
-- **STDIO 模式**: 通过标准输入输出与本地 MCP Server 进程通信
-- **Streamable HTTP 模式**: 通过统一 `/mcp` HTTP endpoint 与远程 MCP Server 通信
-
-主要类：
-- `MCPClient` - MCP 客户端（JSON-RPC 协议）
-- `MCPToolManager` - 工具管理器
-- `MCPServiceIntegrator` - 服务集成器
-- `MCPAgentIntegration` - AI Agent 简化集成接口
-
-### 2. RAG-MCP 模块
-
-基于检索增强生成的智能工具选择：
-
-- `EmbeddingService` - 阿里百炼 DashScope 文本向量化
-- `EmbeddingCache` - LRU 缓存，减少 API 调用
-- `VectorIndex` - 向量索引，余弦相似度搜索
-- `ToolRetriever` - 工具检索器，整合以上组件
-- `ToolValidator` - 可选的工具验证
-
-### 3. MCP 服务器 (`mcp_server`)
-
-完整的 MCP 服务器实现（MIT License, by Giuseppe Mastrangelo）：
-
-- 插件化架构，支持动态加载 `.so` 插件
-- 两种传输模式：STDIO / Streamable HTTP
-- 内置 6 个示例插件
-- 跨平台支持（Linux / macOS / Windows）
-
-## 依赖项
-
-| 依赖 | 用途 | 模块 |
-|------|------|------|
-| C++20 编译器 | 编译 | 全部 |
-| CMake >= 3.20 | 构建 | 全部 |
-| libcurl | HTTP 客户端 | mcp_client |
-| jsoncpp | JSON 解析 | mcp_client |
-| nlohmann/json | JSON（header-only, 已内置） | mcp_server, mcp_client(RAG) |
-| Threads | 多线程 | 全部 |
-
-## 构建
-
-```bash
-mkdir build && cd build && cmake ..
-make -j1
-```
-
-### 仅构建 MCP 服务器
-
-```bash
-cd mcp_server
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
-```
-
-### 构建选项
-
-```bash
-# 不构建示例
-cmake -DBUILD_MCP_EXAMPLES=OFF ..
-
-# Debug 模式
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-```
+模型请求和工具结果回传由上层应用组织，仓库中的在线端到端程序提供了完整示例。
 
 ## 快速开始
 
-### 启动 MCP 服务器
+以下命令在项目根目录执行，面向 **Linux / WSL**。当前代码使用 POSIX 进程、管道和 `dlopen`，插件加载器识别 `.so` 文件；Windows 下请使用 WSL。
+
+### 1. 安装依赖
+
+需要支持 C++20 的编译器、CMake 3.20+、pkg-config、libcurl、jsoncpp，以及 nlohmann-json 开发包。Ubuntu / Debian 可执行：
 
 ```bash
-# STDIO 模式（默认）
-./build/mcp_server/mcp_server -p ./build/mcp_server/plugins
-
-# Streamable HTTP 模式
-./build/mcp_server/mcp_server --streamable-http -p ./build/mcp_server/plugins
+sudo apt-get install -y \
+  build-essential cmake pkg-config \
+  libcurl4-openssl-dev libjsoncpp-dev nlohmann-json3-dev
 ```
 
-### 使用 MCP 客户端
+### 2. 获取并构建
 
-```cpp
-#include "agent_rpc/mcp/mcp_client.h"
+```bash
+git clone https://github.com/naplatte/mcp-agent-runtime.git
+cd mcp-agent-runtime
 
-using namespace agent_rpc::mcp;
-
-// STDIO 模式连接
-MCPClient client;
-client.connect("/path/to/mcp_server", {"--plugins", "./plugins"});
-
-// 列出工具
-auto tools = client.listTools();
-for (const auto& tool : tools) {
-    std::cout << tool.name << ": " << tool.description << std::endl;
-}
-
-// 调用工具
-auto response = client.callTool("calculator", R"({"expression": "2+3"})");
-std::cout << response.result << std::endl;
-
-client.disconnect();
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTS=ON -DBUILD_MCP_EXAMPLES=ON
+cmake --build build -j4
 ```
 
-### 使用 RAG-MCP 智能工具检索
+`BUILD_TESTS` 和 `BUILD_MCP_EXAMPLES` 默认开启，可按需关闭。主要产物：
+
+| 路径 | 用途 |
+| --- | --- |
+| `build/mcp_server/mcp_server` | MCP 服务端 |
+| `build/mcp_server/plugins/` | 各插件子目录中的共享库 |
+| `build/mcp_client/libmcp_client.a` | 客户端静态库 |
+| `build/examples/rag_mcp_example` | 集成层与工具检索示例 |
+| `build/tests/cpp/` | C++ 回归与集成测试程序 |
+
+### 3. 运行离线回归
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+CTest 注册了 `mcp_timeouts`、`rag_mmr` 和 `rag_hybrid` 三组测试，覆盖传输与请求生命周期、MMR、关键词索引和混合检索。它们不需要模型密钥或真实天气接口。
+
+### 4. 体验工具调用
+
+```bash
+./build/tests/cpp/test_mcp_integration \
+  ./build/mcp_server/mcp_server \
+  ./build/mcp_server/plugins \
+  --interactive
+```
+
+客户端会启动 STDIO 服务并发现插件，按终端提示列出或调用工具。计算器工具可在本地运行；天气工具需要访问外部接口。
+
+## 使用 Streamable HTTP
+
+在第一个终端启动服务：
+
+```bash
+mkdir -p build/logs
+./build/mcp_server/mcp_server \
+  --streamable-http --http-port 8080 \
+  -p ./build/mcp_server/plugins \
+  -l ./build/logs
+```
+
+在第二个终端运行客户端：
+
+```bash
+./build/tests/cpp/test_mcp_integration \
+  ./build/mcp_server/mcp_server \
+  ./build/mcp_server/plugins \
+  --streamable-http http://127.0.0.1:8080/mcp \
+  --interactive
+```
+
+服务默认绑定 `127.0.0.1`，MCP 入口为 `/mcp`，健康检查为 `/health`。可通过 `--request-timeout-ms` 设置 HTTP 响应超时，通过 `--sse-keepalive-ms` 设置 SSE 保活间隔；完整参数见 `mcp_server --help`。
+
+## 在 C++ 应用中接入
+
+下面的最小示例使用 STDIO 连接服务并执行计算器工具，无需模型服务。运行目录为项目根目录。
 
 ```cpp
 #include "agent_rpc/mcp/mcp_agent_integration.h"
+#include <iostream>
 
-using namespace agent_rpc::mcp;
+int main() {
+    using namespace agent_rpc::mcp;
 
-MCPAgentConfig config;
-config.enable_mcp = true;
-config.mcp_server_path = "/path/to/mcp_server";
+    MCPAgentConfig config;
+    config.enable_mcp = true;
+    config.mcp_server_path = "./build/mcp_server/mcp_server";
+    config.mcp_args = {"-p", "./build/mcp_server/plugins"};
+
+    MCPAgentIntegration integration;
+    if (!integration.initialize(config) || !integration.isAvailable()) {
+        std::cerr << "MCP connection unavailable\n";
+        return 1;
+    }
+
+    const auto result = integration.callTool(
+        "calculator", R"({"expression":"123 + 456"})");
+    std::cout << (result.success ? result.result : result.error) << '\n';
+
+    integration.shutdown();
+    return result.success ? 0 : 1;
+}
+```
+
+在本项目的 CMake 构建中，将应用链接到 `mcp_client` 目标即可。`initialize()` 允许连接失败时降级返回，因此调用工具前需要检查 `isAvailable()`。
+
+## 启用 RAG 工具筛选
+
+在初始化前，为上述 `config` 添加配置：
+
+```cpp
 config.rag_config.enabled = true;
-config.rag_config.api_key = std::getenv("DASHSCOPE_API_KEY");
-
-MCPAgentIntegration mcp;
-mcp.initialize(config);
-
-// 智能检索最相关的工具
-auto tools = mcp.getRelevantTools("计算 123 + 456");
-
-// 获取 LLM 函数调用格式
-std::string json = mcp.getRelevantToolsAsJson("查询天气");
+config.rag_config.top_k = 5;
+config.rag_config.enable_hybrid = true;  // 可选：向量 + BM25 + RRF
+config.rag_config.index_path = "./build/tool_index.json";
 ```
 
-### 测试 MCP 服务器
+在运行环境中设置 `DASHSCOPE_API_KEY`，默认 Embedding 模型为 `text-embedding-v2`。初始化后，使用以下接口获取候选：
 
-统一入口脚本，支持三种测试模式：
+```cpp
+if (!integration.isRAGEnabled()) {
+    // 按应用需要处理 RAG 未就绪的情况。
+}
+auto tools = integration.getRelevantTools("计算 123 加 456");
+auto functions = MCPAgentIntegration::toFunctionCallingFormat(tools);
+```
+
+`functions` 是包含 `name`、`description`、`parameters` 的函数定义数组；对接 Chat Completions 的 `tools` 字段时，需要为每项包装 `{"type":"function","function":...}`。模型选择工具后，再调用 `integration.callTool()` 并将结果回传模型。
+
+可用的三种检索方式：
+
+| 方式 | 配置 | 处理过程 |
+| --- | --- | --- |
+| 向量检索 | 默认；不启用 Hybrid 或 MMR | 工具元数据向量化，按余弦相似度取 Top-K |
+| 混合检索 | `enable_hybrid = true` | 向量与本地 BM25 分别召回，再使用 RRF 融合排名 |
+| MMR | `enable_mmr = true` | 从向量候选池逐次选择，平衡相关性与候选间的相似度 |
+
+Hybrid 和 MMR 当前不能同时启用。混合检索不增加额外的查询 Embedding 请求，但仍依赖有效的向量索引与查询向量。
+
+RAG 默认关闭。未启用或初始化失败时，`getRelevantTools()` 返回全量工具；已启用后的检索失败可能返回空列表，应用需要检查 `isRAGEnabled()` 和候选结果。
+
+## 内置插件
+
+| 插件目录 | 类型 | 提供的能力 |
+| --- | --- | --- |
+| `calculator` | Tool | 表达式计算、加减乘除、幂、平方根、阶乘 |
+| `weather` | Tool | `get_weather`：按城市及经纬度查询天气 |
+| `sleep` | Tool | `sleep`：延时执行，支持协作取消 |
+| `log-analyzer` | Tool | `tail_log`、`analyze_log`、`summarize_errors` |
+| `notification` | Tool | `progress_test`、`logging_test`：通知演示 |
+| `code-review` | Prompt | 代码审查提示模板 |
+| `bacio-quote` | Resource | `bacio:///quote`：名言文本资源 |
+
+服务端启动时递归扫描 `-p` 指定的目录。扩展插件时，可参考 [PluginAPI.h](mcp_server/include/PluginAPI.h)、[calculator 插件](mcp_server/plugins/calculator/Calculator.cpp)及其 [CMake 配置](mcp_server/plugins/calculator/CMakeLists.txt)。插件导出 `CreatePlugin` 和 `DestroyPlugin`，可额外导出 `HandleRequestWithContext` 接收取消上下文。
+
+## 在线验证与效果评测
+
+### 真实模型端到端测试
+
+配置 `DASHSCOPE_API_KEY` 后运行：
 
 ```bash
-bash ./tests/test_all.sh
+./build/tests/cpp/test_rag_agent_e2e \
+  ./build/mcp_server/mcp_server \
+  ./build/mcp_server/plugins/calculator
 ```
 
-运行后选择模式：
+程序验证“工具发现 → C++ RAG 筛选 → 模型选择 → MCP 执行 → 结果回传模型”的链路，默认对话模型为 `qwen-plus`。缺少密钥时以退出码 `77` 跳过；详细检查项见 [端到端测试说明](docs/cpp-rag-agent-e2e.md)。
 
-- **模式 1 — AI 集成测试（推荐）**：使用阿里百炼 AI 模型，测试完整 Agent 工具调用链路
-- **模式 2 — 基础功能测试**：无需 API Key，用 bash 验证 MCP Server 协议和插件
-- **模式 3 — C++ 集成测试**：使用项目自身的 mcp_client 测试 server + plugins（全链路 C++）
+### 工具选择对照
 
-#### AI 集成测试
-
-使用阿里百炼 (DashScope) 大模型作为 AI Agent，通过 MCP 协议调用工具，验证完整链路：
-
-```
-用户查询 → Embedding 向量化 → RAG 相似度检索 → 筛选相关工具 → LLM (工具选择) → MCP Server (工具执行) → LLM (生成回答)
-```
-
-**前置条件**：
-
-- 阿里百炼 API Key（[申请地址](https://dashscope.console.aliyun.com/)）
-- Python 3.6+（无需额外依赖）
+评测脚本需要 Python 3.10+，无需额外 Python 包：
 
 ```bash
-# 交互式运行，终端输入 API Key
-bash ./tests/test_all.sh
-# 选择 1
+# 离线自检：验证评测流程，不产生真实模型效果结论
+python3 tests/rag_effectiveness/run.py --self-test
 
-# 或通过环境变量
-DASHSCOPE_API_KEY="sk-xxx" python3 tests/python/test_ai_mcp.py
-
-# 指定模型
-DASHSCOPE_API_KEY="sk-xxx" DASHSCOPE_MODEL="qwen-turbo" python3 tests/python/test_ai_mcp.py
+# 在线对照：全量工具 vs 混合检索筛选出的工具
+python3 tests/rag_effectiveness/run.py \
+  --live --selection hybrid --k 20 --repeats 1
 ```
 
-测试覆盖项：
+在线对照使用 80 道题和 50 / 100 / 300 三档工具目录，统计模型的**工具选择命中率**与接口返回的**平均输入 token**。目录包含真实 MCP 工具定义和模拟定义；该评测只检查模型选择，不执行工具业务，也不评判参数正确性。报告默认保存在 `tests/rag_effectiveness/results/`，详细用法和统计口径见 [评测说明](tests/rag_effectiveness/README.md)。
 
-| 步骤 | 测试内容 |
-|------|----------|
-| MCP 初始化 | 启动服务器，建立 STDIO 连接 |
-| 工具发现 | 获取所有插件注册的工具列表 |
-| RAG 索引构建 | 批量 Embedding 向量化所有工具，建立向量索引 |
-| RAG + AI 交互式调用 | 用户查询 → 向量相似度筛选工具 → 仅相关工具发给 LLM → MCP 执行 → 回传结果 |
-| 基础工具验证 | 直接调用 sleep、calculator、错误处理 |
+在线测试会调用外部 Embedding / 对话接口。离线回归通过不能证明在线命中率提高，具体收益需要在相同模型、问题和参数下实际对照。
 
-#### 基础功能测试
+## 目录导航
 
-无需 API Key，直接验证 MCP Server 协议正确性：
-
-```bash
-./tests/test_all.sh
-# 选择 2
+```text
+.
+├── common/                    # 公共日志组件
+├── mcp_client/
+│   ├── include/agent_rpc/mcp/  # 客户端、Agent 集成层与 RAG 接口
+│   └── src/                   # 通信、工具管理及检索实现
+├── mcp_server/
+│   ├── include/               # 服务端、传输与插件 ABI
+│   ├── src/                   # 协议分发、传输及插件加载
+│   └── plugins/               # 内置 Tool / Prompt / Resource 插件
+├── examples/                  # RAG-MCP 使用示例
+├── tests/
+│   ├── cpp/                   # C++ 回归与集成验证
+│   ├── python/                # Python 客户端示例
+│   └── rag_effectiveness/     # 工具选择对照评测
+├── third_party/               # 随仓库提供的单头文件依赖
+└── docs/                      # 检索策略与端到端说明
 ```
 
-覆盖：initialize、ping、tools/list、calculator、sleep、error handling。
+进一步阅读：[混合检索](docs/rag-hybrid.md) · [MMR](docs/rag-mmr.md) · [在线端到端链路](docs/cpp-rag-agent-e2e.md) · [效果评测](tests/rag_effectiveness/README.md)。
 
-#### 手动测试
+## 当前边界
 
-```bash
-# 通过管道发送 JSON-RPC 请求
-echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":"1"}' \
-  | ./build/mcp_server/mcp_server -p ./build/mcp_server/plugins -l ./build/test_logs
-```
+- 项目提供 MCP 通信、插件与工具检索组件；模型接入及多轮任务调度由应用负责。
+- 向量索引使用内存中的全量相似度计算与排序，没有接入独立向量数据库或近似最近邻索引。
+- 取消采用协作方式：客户端超时会发送取消通知，插件需要主动检查取消状态；旧插件不会因此被强制中断。
+- 插件在服务端进程内执行，当前没有进程隔离或运行时热更新。HTTP 服务默认用于本机接入，没有实现完整的身份认证与权限体系。
+- 对异步调用，调用方需要保证集成对象存活到回调结束。
 
-#### C++ 集成测试
+## 版权与许可
 
-使用项目自身的 C++ `mcp_client` 模块连接 `mcp_server`，测试完整的 C++ 链路：
-
-```bash
-./tests/test_all.sh
-# 选择 3
-
-# 或直接运行
-./build/tests/cpp/test_mcp_integration ./build/mcp_server/mcp_server ./build/mcp_server/plugins
-```
-
-覆盖：连接 (STDIO)、list_tools、call_tool (weather/sleep)、错误处理、list_prompts、list_resources。
-
-#### Python MCP 客户端测试
-
-```bash
-cd tests
-pip install -r config/requirements.txt
-python3 python/test-client-stdio.py config/configuration-stdio-linux.json
-```
-
-## 开发自定义插件
-
-参见 [docs/mcp-plugin-development.md](docs/mcp-plugin-development.md)。
-
-## RAG-MCP 详细指南
-
-参见 [docs/rag-mcp-guide.md](docs/rag-mcp-guide.md)。
-
-## 协议版本
-
-- MCP Client: JSON-RPC 2.0
-- MCP Server: v0.7.0
-
-## License
-
-MCP Server 部分基于 MIT License (Copyright (C) 2025 Giuseppe Mastrangelo)。
-其余部分遵循原项目许可证。
+服务端部分源码保留了 MIT 许可声明（Copyright © 2025 Giuseppe Mastrangelo）。第三方依赖的版权与许可见各文件声明，使用与分发时请一并保留。
